@@ -323,8 +323,10 @@ end subroutine estuary_box_model
 !! imaginary parts.
 subroutine cubsolve(a, b, c, roots)
 
-  real,                  intent(in)  :: a, b, c  !< Coefficients of x^3 + ax^2 + bx + c = 0 [nondim]
-  real, dimension(3,2),  intent(out) :: roots     !< Roots [nondim]: column 1 = real, column 2 = imaginary
+  real, intent(in)  :: a     !< Coefficient of x^2 in x^3 + ax^2 + bx + c = 0 [nondim]
+  real, intent(in)  :: b     !< Coefficient of x in x^3 + ax^2 + bx + c = 0 [nondim]
+  real, intent(in)  :: c     !< Constant term in x^3 + ax^2 + bx + c = 0 [nondim]
+  real, dimension(3,2), intent(out) :: roots !< Roots [nondim]: column 1 = real, column 2 = imaginary
 
   ! local variables
   real :: Q     ! Intermediate cubic parameter [nondim]
