@@ -1461,9 +1461,6 @@ subroutine diabatic_aux_init(Time, G, GV, US, param_file, diag, CS, useALEalgori
                  "Fraction of the available brine to mix down using the brine plume parameterization.", &
                  units="nondim", default=1.0, do_not_log=.not.CS%do_brine_plume)
 
-  call get_param(param_file, mdl, "USE_EBM", CS%use_EBM, default=.false., do_not_log=.true.)
-  if (CS%use_EBM) CS%use_EBM = EBM_init(param_file, CS%EBM_CS)
-
   if (useALEalgorithm) then
     CS%id_createdH = register_diag_field('ocean_model',"created_H",diag%axesT1, &
         Time, "The volume flux added to stop the ocean from drying out and becoming negative in depth", &
@@ -1531,6 +1528,9 @@ subroutine diabatic_aux_init(Time, G, GV, US, param_file, diag, CS, useALEalgori
           'Surface chlorophyll A concentration used to find opacity', 'mg m-3')
     endif
   endif
+
+  call get_param(param_file, mdl, "USE_EBM", CS%use_EBM, default=.false., do_not_log=.true.)
+  if (CS%use_EBM) CS%use_EBM = EBM_init(param_file, CS%EBM_CS)
 
   id_clock_uv_at_h = cpu_clock_id('(Ocean find_uv_at_h)', grain=CLOCK_ROUTINE)
   id_clock_frazil  = cpu_clock_id('(Ocean frazil)', grain=CLOCK_ROUTINE)
