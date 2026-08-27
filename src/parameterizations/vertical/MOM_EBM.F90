@@ -11,6 +11,9 @@ module MOM_EBM
 
 use MOM_error_handler, only : MOM_error, WARNING
 use MOM_file_parser,   only : get_param, log_version, param_file_type
+use MOM_grid,          only : ocean_grid_type
+
+#include <MOM_memory.h>
 
 implicit none ; private
 
@@ -29,6 +32,7 @@ type, public :: EBM_cs ; private
   real :: rho_ref    !< Reference density for linear equation of state [kg m-3]
   real :: beta_S   !< Saline contraction coefficient [ppt-1]
   real :: Sc       !< Schmidt number [nondim]
+  real, allocatable, dimension(:,:) :: H_est !< Estuary averaged depth [m]
 
 end type EBM_cs
 
@@ -38,10 +42,11 @@ contains
 
 !> Initializes the estuary box model parameterization.
 !! Returns .true. if the parameterization is enabled.
-logical function EBM_init(param_file, CS)
+logical function EBM_init(param_file, G, CS)
 
-  type(param_file_type), intent(in)    :: param_file !< Run-time parameter file handle
-  type(EBM_cs),          intent(inout) :: CS         !< EBM control structure
+  type(param_file_type),  intent(in)    :: param_file !< Run-time parameter file handle
+  type(ocean_grid_type),  intent(in)    :: G          !< The ocean's grid structure
+  type(EBM_cs),           intent(inout) :: CS         !< EBM control structure
 
   ! This include declares and sets the variable "version".
 # include "version_variable.h"
@@ -95,6 +100,9 @@ logical function EBM_init(param_file, CS)
                  "Schmidt number used in the EBM.", &
                  units="nondim", default=2.2)
 
+  allocate(CS%H_est(SZI_(G),SZJ_(G)))
+  CS%H_est(:,:) = CS%H
+
 end function EBM_init
 
 !> Calculates estuary box model exchange and distributes river runoff over the
@@ -102,11 +110,10 @@ end function EBM_init
 !! The estuary exchange fluxes (Q_u, Q_l, S_u) are computed by estuary_box_model
 !! using the EBM parameters in CS together with the provided river discharge and
 !! lower-layer salinity.
-subroutine calculate_EBM(CS, lrunoff, S_l, EnthalpyConst, netMassIn, T2d_col, S_col, h2d_col)
+subroutine calculate_EBM(CS, lrunoff, EnthalpyConst, netMassIn, T2d_col, S_col, h2d_col)
 
   type(EBM_cs), intent(in)    :: CS            !< EBM control structure
   real,         intent(in)    :: lrunoff       !< River runoff for this column [H ~> m or kg m-2]
-  real,         intent(in)    :: S_l           !< Salinity at the estuary lower layer [S ~> ppt]
   real,         intent(in)    :: EnthalpyConst !< Enthalpy constant [nondim]
   real,         intent(inout) :: netMassIn     !< Net mass entering this column [H ~> m or kg m-2]
   real,         intent(inout) :: T2d_col(:)    !< Temperature in first 4 layers [C ~> degC]
@@ -116,7 +123,8 @@ subroutine calculate_EBM(CS, lrunoff, S_l, EnthalpyConst, netMassIn, T2d_col, S_
   ! local variables
   real :: Q_u        ! EBM upper layer volume flux [m3 s-1]
   real :: Q_l        ! EBM lower layer volume flux [m3 s-1]
-  real :: S_u        ! EBM upper layer salinity [ppt]
+  real :: S_l        ! EBM lower layer salinity    [S ~> ppt]
+  real :: S_u        ! EBM upper layer salinity [S ~> ppt]
   real :: dThickness ! Change in layer thickness [H ~> m or kg m-2]
   real :: dTemp      ! Integrated change in layer temperature [C H ~> degC m or degC kg m-2]
   real :: dSalt      ! Integrated change in layer salinity [S H ~> ppt m or ppt kg m-2]
@@ -128,6 +136,9 @@ subroutine calculate_EBM(CS, lrunoff, S_l, EnthalpyConst, netMassIn, T2d_col, S_
 
   ! GMM, TODO: need to specify Hu, instead of hard code thickness...
 
+  ! Compute salinity of lower layer [S ~> ppt]
+  ! s_l = get_lower_layer_salinity(S_col, h2d_col)
+
   ! Distribute river runoff over the first 4 layers
   do k = 1, size(T2d_col)
     dThickness = lrunoff * 0.25  ! Each of the 4 layers receives 1/4 of the runoff
@@ -136,8 +147,9 @@ subroutine calculate_EBM(CS, lrunoff, S_l, EnthalpyConst, netMassIn, T2d_col, S_
 
     netMassIn = netMassIn - dThickness
     Temp_in  = T2d_col(k)
-    Salin_in = 0.0
     dTemp = dTemp + dThickness * Temp_in * EnthalpyConst
+    ! GMM, this is not used. Delete?
+    Salin_in = 0.0
 
     hOld = h2d_col(k)
     h2d_col(k) = h2d_col(k) + dThickness
@@ -149,7 +161,7 @@ subroutine calculate_EBM(CS, lrunoff, S_l, EnthalpyConst, netMassIn, T2d_col, S_
   end do
 
   ! GMM, todo
-  call estuary_box_model(CS, lrunoff, S_l, Q_u, Q_l, S_u)
+  !call estuary_box_model(CS, lrunoff, S_l, Q_u, Q_l, S_u)
 
 end subroutine calculate_EBM
 
