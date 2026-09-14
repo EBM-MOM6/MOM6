@@ -178,8 +178,7 @@ subroutine calculate_EBM(CS, i, j, lrunoff, EnthalpyConst, netMassIn, T2d_col, S
   real :: hOld       ! Original layer thickness before update [H ~> m or kg m-2]
   real :: Ithickness ! Inverse of the updated layer thickness [H-1 ~> m-1 or m2 kg-1]
   integer :: k       ! Layer index [nondim]
-  ! TODO: should these be allocatable?
-  real, dimension(2) :: dz_ebm(:) !< temporary
+  real, dimension(2) :: dz_ebm ! EBM layer thicknesses [m]
 
   ! EBM grid
   dz_ebm(1) = CS%H_U(i,j)
