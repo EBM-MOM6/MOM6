@@ -9,9 +9,11 @@
 !! https://doi.org/10.1016/j.ocemod.2017.03.004
 module MOM_EBM
 
-use MOM_error_handler,         only : MOM_error, WARNING
+use MOM_error_handler,         only : MOM_error, WARNING, FATAL, is_root_pe
 use MOM_file_parser,           only : get_param, log_version, param_file_type
 use MOM_grid,                  only : ocean_grid_type
+use MOM_io,                    only : file_exists, field_size, open_file_to_read
+use MOM_io,                    only : close_file_to_read, read_variable, stdout, slasher
 use MOM_remapping,             only : remapping_CS, initialize_remapping, reintegrate_column
 use MOM_remapping,             only : extract_member_remapping_CS, remapping_core_h
 use MOM_remapping,             only : remappingSchemesDoc, remappingDefaultScheme
@@ -60,9 +62,14 @@ logical function EBM_init(param_file, G, GV, CS)
   type(EBM_cs),           intent(inout) :: CS         !< EBM control structure
 
   ! local variables
-  character(len=80) :: string              ! Temporary strings
-  logical           :: boundary_extrap     ! Controls if boundary extrapolation is used
-  logical           :: om4_remap_via_sub_cells ! Use the OM4-era remap_via_sub_cells
+  character(len=80)  :: string              ! Temporary strings
+  character(len=200) :: ebm_edits_file      ! Name of the EBM depth edits file
+  character(len=200) :: inputdir            ! Path to the input directory
+  logical            :: boundary_extrap     ! Controls if boundary extrapolation is used
+  logical            :: om4_remap_via_sub_cells ! Use the OM4-era remap_via_sub_cells
+  real, dimension(:), allocatable :: new_depth ! The new values of estuary depth [m]
+  integer, dimension(:), allocatable :: ig, jg ! The global indices of points to modify
+  integer :: i, j, n, ncid, n_edits, i_file, j_file, ndims, sizes(8)
 
   ! This include declares and sets the variable "version".
 # include "version_variable.h"
@@ -145,6 +152,62 @@ logical function EBM_init(param_file, G, GV, CS)
   ! TODO: revisit these later with limiters
   CS%H_U(:,:) = CS%H * 0.5
   CS%H_L(:,:) = CS%H * 0.5
+
+  ! Apply optional point-by-point overrides of H_est from a file
+  call get_param(param_file, mdl, "INPUTDIR", inputdir, default=".")
+  inputdir = slasher(inputdir)
+  call get_param(param_file, mdl, "EBM_DEPTH_EDITS_FILE", ebm_edits_file, &
+                 "The file from which to read a list of i,j,depth overrides for the "//&
+                 "estuary averaged depth (H_est). The file must be in NetCDF format "//&
+                 "with scalar variables 'ni' and 'nj' matching the global grid "//&
+                 "dimensions, and 1-D arrays 'iEdit', 'jEdit', and 'zEdit' (all of "//&
+                 "size nEdits) giving the global i-index, global j-index (both using "//&
+                 "Python 0-based indexing), and new estuary depth [m] for each edit.", &
+                 default="")
+
+  if (len_trim(ebm_edits_file) > 0) then
+    ebm_edits_file = trim(inputdir)//trim(ebm_edits_file)
+    if (is_root_pe()) then
+      if (.not.file_exists(ebm_edits_file, G%Domain)) &
+        call MOM_error(FATAL, trim(mdl)//': Unable to find file '//trim(ebm_edits_file))
+      call open_file_to_read(ebm_edits_file, ncid)
+    else
+      ncid = -1
+    endif
+
+    ! Read and check the values of ni and nj in the file for consistency with this configuration.
+    call read_variable(ebm_edits_file, 'ni', i_file, ncid_in=ncid)
+    call read_variable(ebm_edits_file, 'nj', j_file, ncid_in=ncid)
+    if (i_file /= G%ieg) call MOM_error(FATAL, trim(mdl)//': Incompatible i-dimension of grid in '//&
+                                        trim(ebm_edits_file))
+    if (j_file /= G%jeg) call MOM_error(FATAL, trim(mdl)//': Incompatible j-dimension of grid in '//&
+                                        trim(ebm_edits_file))
+
+    ! Get nEdits
+    call field_size(ebm_edits_file, 'zEdit', sizes, ndims=ndims, ncid_in=ncid)
+    if (ndims /= 1) call MOM_error(FATAL, "The variable zEdit has an "//&
+              "unexpected number of dimensions in "//trim(ebm_edits_file))
+    n_edits = sizes(1)
+    allocate(ig(n_edits), jg(n_edits), new_depth(n_edits))
+
+    ! Read iEdit, jEdit and zEdit
+    call read_variable(ebm_edits_file, 'iEdit', ig, ncid_in=ncid)
+    call read_variable(ebm_edits_file, 'jEdit', jg, ncid_in=ncid)
+    call read_variable(ebm_edits_file, 'zEdit', new_depth, ncid_in=ncid)
+    call close_file_to_read(ncid, ebm_edits_file)
+
+    do n = 1, n_edits
+      i = ig(n) - G%idg_offset + 1 ! +1 for python indexing
+      j = jg(n) - G%jdg_offset + 1
+      if (i>=G%isc .and. i<=G%iec .and. j>=G%jsc .and. j<=G%jec) then
+        write(stdout,'(a,3i5,f8.2,a,f8.2,2i4)') &
+          'EBM depth edit: ', n, ig(n), jg(n), CS%H_est(i,j), '->', abs(new_depth(n)), i, j
+        CS%H_est(i,j) = abs(new_depth(n))
+      endif
+    enddo
+
+    deallocate(ig, jg, new_depth)
+  endif
 
 end function EBM_init
 
