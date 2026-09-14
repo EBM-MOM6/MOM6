@@ -1009,7 +1009,7 @@ subroutine applyBoundaryFluxesInOut(CS, G, GV, US, dt, fluxes, optics, nsw, h, t
         ! This only works if aggregate_FW_forcing = False.
         ! GMM, TODO: workout how to specify the number of vertical layers
         if (CS%use_EBM) &
-          call calculate_EBM(CS%EBM_CS, fluxes%lrunoff(i,j), EnthalpyConst, &
+          call calculate_EBM(CS%EBM_CS, i, j, fluxes%lrunoff(i,j), EnthalpyConst, &
                              netMassIn(i), T2d(i,1:4), tv%S(i,j,1:4), h2d(i,1:4))
 
         ! A/ Update mass, temp, and salinity due to incoming mass flux.
@@ -1531,7 +1531,7 @@ subroutine diabatic_aux_init(Time, G, GV, US, param_file, diag, CS, useALEalgori
   endif
 
   call get_param(param_file, mdl, "USE_EBM", CS%use_EBM, default=.false., do_not_log=.true.)
-  if (CS%use_EBM) CS%use_EBM = EBM_init(param_file, G, CS%EBM_CS)
+  if (CS%use_EBM) CS%use_EBM = EBM_init(param_file, G, GV, CS%EBM_CS)
 
   id_clock_uv_at_h = cpu_clock_id('(Ocean find_uv_at_h)', grain=CLOCK_ROUTINE)
   id_clock_frazil  = cpu_clock_id('(Ocean frazil)', grain=CLOCK_ROUTINE)

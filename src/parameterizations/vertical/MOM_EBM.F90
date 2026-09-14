@@ -9,9 +9,13 @@
 !! https://doi.org/10.1016/j.ocemod.2017.03.004
 module MOM_EBM
 
-use MOM_error_handler, only : MOM_error, WARNING
-use MOM_file_parser,   only : get_param, log_version, param_file_type
-use MOM_grid,          only : ocean_grid_type
+use MOM_error_handler,         only : MOM_error, WARNING
+use MOM_file_parser,           only : get_param, log_version, param_file_type
+use MOM_grid,                  only : ocean_grid_type
+use MOM_remapping,             only : remapping_CS, initialize_remapping, reintegrate_column
+use MOM_remapping,             only : extract_member_remapping_CS, remapping_core_h
+use MOM_remapping,             only : remappingSchemesDoc, remappingDefaultScheme
+use MOM_verticalGrid,          only : verticalGrid_type
 
 #include <MOM_memory.h>
 
@@ -33,6 +37,12 @@ type, public :: EBM_cs ; private
   real :: beta_S   !< Saline contraction coefficient [ppt-1]
   real :: Sc       !< Schmidt number [nondim]
   real, allocatable, dimension(:,:) :: H_est !< Estuary averaged depth [m]
+  real, allocatable, dimension(:,:) :: H_U !< Thickness of EBM discharge into MOM6 (upper) [m]
+  real, allocatable, dimension(:,:) :: H_L !< Thickness of MOM6 discharging to EBM (lower) [m]
+  integer :: deg              !< Degree of polynomial reconstruction [nondim]
+  real    :: H_subroundoff   !< A thickness that is so small that it can be added to a thickness of
+                             !! Angstrom or larger without changing it at the bit level [H ~> m or kg m-2].
+  type(remapping_CS)                :: remap_CS !< Control structure to hold remapping configuration.
 
 end type EBM_cs
 
@@ -42,11 +52,17 @@ contains
 
 !> Initializes the estuary box model parameterization.
 !! Returns .true. if the parameterization is enabled.
-logical function EBM_init(param_file, G, CS)
+logical function EBM_init(param_file, G, GV, CS)
 
   type(param_file_type),  intent(in)    :: param_file !< Run-time parameter file handle
   type(ocean_grid_type),  intent(in)    :: G          !< The ocean's grid structure
+  type(verticalGrid_type), intent(in)   :: GV         !< The ocean's vertical grid structure
   type(EBM_cs),           intent(inout) :: CS         !< EBM control structure
+
+  ! local variables
+  character(len=80) :: string              ! Temporary strings
+  logical           :: boundary_extrap     ! Controls if boundary extrapolation is used
+  logical           :: om4_remap_via_sub_cells ! Use the OM4-era remap_via_sub_cells
 
   ! This include declares and sets the variable "version".
 # include "version_variable.h"
@@ -100,8 +116,35 @@ logical function EBM_init(param_file, G, CS)
                  "Schmidt number used in the EBM.", &
                  units="nondim", default=2.2)
 
+  ! Remapping initialization
+  CS%H_subroundoff = GV%H_subroundoff
+  call get_param(param_file, mdl, "EBM_BOUNDARY_EXTRAP", boundary_extrap, &
+                 "Use boundary extrapolation in EBM remapping.", &
+                 default=.false.)
+  call get_param(param_file, mdl, "EBM_REMAPPING_SCHEME", string, &
+                 "This sets the reconstruction scheme used "//&
+                 "for vertical remapping for all variables. "//&
+                 "It can be one of the following schemes: "//&
+                 trim(remappingSchemesDoc), default=remappingDefaultScheme)
+  call get_param(param_file, mdl, "REMAPPING_USE_OM4_SUBCELLS", om4_remap_via_sub_cells, &
+                 do_not_log=.true., default=.true.)
+  call get_param(param_file, mdl, "EBM_REMAPPING_USE_OM4_SUBCELLS", om4_remap_via_sub_cells, &
+                 "If true, use the OM4 remapping-via-subcells algorithm for the EBM. "//&
+                 "See REMAPPING_USE_OM4_SUBCELLS for details. "//&
+                 "We recommend setting this option to false.", default=om4_remap_via_sub_cells)
+  call initialize_remapping(CS%remap_CS, string, boundary_extrapolation=boundary_extrap, &
+                            om4_remap_via_sub_cells=om4_remap_via_sub_cells, &
+                            check_reconstruction=.false., check_remapping=.false., &
+                            h_neglect=CS%H_subroundoff, h_neglect_edge=CS%H_subroundoff)
+  call extract_member_remapping_CS(CS%remap_CS, degree=CS%deg)
+
   allocate(CS%H_est(SZI_(G),SZJ_(G)))
+  allocate(CS%H_U(SZI_(G),SZJ_(G)))
+  allocate(CS%H_L(SZI_(G),SZJ_(G)))
   CS%H_est(:,:) = CS%H
+  ! TODO: revisit these later with limiters
+  CS%H_U(:,:) = CS%H * 0.5
+  CS%H_L(:,:) = CS%H * 0.5
 
 end function EBM_init
 
@@ -110,9 +153,11 @@ end function EBM_init
 !! The estuary exchange fluxes (Q_u, Q_l, S_u) are computed by estuary_box_model
 !! using the EBM parameters in CS together with the provided river discharge and
 !! lower-layer salinity.
-subroutine calculate_EBM(CS, lrunoff, EnthalpyConst, netMassIn, T2d_col, S_col, h2d_col)
+subroutine calculate_EBM(CS, i, j, lrunoff, EnthalpyConst, netMassIn, T2d_col, S_col, h2d_col)
 
   type(EBM_cs), intent(in)    :: CS            !< EBM control structure
+  integer,      intent(in)    :: i             !< i-index of the current column [nondim]
+  integer,      intent(in)    :: j             !< j-index of the current column [nondim]
   real,         intent(in)    :: lrunoff       !< River runoff for this column [H ~> m or kg m-2]
   real,         intent(in)    :: EnthalpyConst !< Enthalpy constant [nondim]
   real,         intent(inout) :: netMassIn     !< Net mass entering this column [H ~> m or kg m-2]
@@ -133,6 +178,12 @@ subroutine calculate_EBM(CS, lrunoff, EnthalpyConst, netMassIn, T2d_col, S_col, 
   real :: hOld       ! Original layer thickness before update [H ~> m or kg m-2]
   real :: Ithickness ! Inverse of the updated layer thickness [H-1 ~> m-1 or m2 kg-1]
   integer :: k       ! Layer index [nondim]
+  ! TODO: should these be allocatable?
+  real, dimension(2) :: dz_ebm(:) !< temporary
+
+  ! EBM grid
+  dz_ebm(1) = CS%H_U(i,j)
+  dz_ebm(2) = CS%H_L(i,j)
 
   ! GMM, TODO: need to specify Hu, instead of hard code thickness...
 
