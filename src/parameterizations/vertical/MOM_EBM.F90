@@ -40,8 +40,10 @@ type, public :: EBM_cs ; private
   real :: beta_S   !< Saline contraction coefficient [ppt-1]
   real :: Sc       !< Schmidt number [nondim]
   real, allocatable, dimension(:,:) :: H_est !< Estuary averaged depth [m]
-  real, allocatable, dimension(:,:) :: H_U !< Thickness of EBM discharge into MOM6 (upper) [m]
-  real, allocatable, dimension(:,:) :: H_L !< Thickness of MOM6 discharging to EBM (lower) [m]
+  real, allocatable, dimension(:,:) :: H_U  !< Thickness of EBM discharge into MOM6 (upper) [m]
+  real, allocatable, dimension(:,:) :: H_L  !< Thickness of MOM6 discharging to EBM (lower) [m]
+  real, allocatable, dimension(:,:,:) :: wf_U !< Weighting function for the upper layer [nondim]
+  real, allocatable, dimension(:,:,:) :: wf_L !< Weighting function for the lower layer [nondim]
   integer :: deg              !< Degree of polynomial reconstruction [nondim]
   real    :: H_subroundoff   !< A thickness that is so small that it can be added to a thickness of
                              !! Angstrom or larger without changing it at the bit level [H ~> m or kg m-2].
@@ -148,13 +150,17 @@ logical function EBM_init(param_file, G, GV, diag, CS)
                             h_neglect=CS%H_subroundoff, h_neglect_edge=CS%H_subroundoff)
   call extract_member_remapping_CS(CS%remap_CS, degree=CS%deg)
 
+  ! Allocate and initialize arrays
   allocate(CS%H_est(SZI_(G),SZJ_(G)))
   allocate(CS%H_U(SZI_(G),SZJ_(G)))
   allocate(CS%H_L(SZI_(G),SZJ_(G)))
+  allocate(CS%wf_U(SZI_(G),SZJ_(G),2))
+  allocate(CS%wf_L(SZI_(G),SZJ_(G),2))
   CS%H_est(:,:) = CS%H
-  ! TODO: revisit these later with limiters
-  CS%H_U(:,:) = CS%H * 0.5
-  CS%H_L(:,:) = CS%H * 0.5
+  CS%H_U(:,:) = 0.0
+  CS%H_L(:,:) = 0.0
+  CS%wf_U(:,:,:) = 0.0
+  CS%wf_L(:,:,:) = 0.0
 
   ! Apply optional point-by-point overrides of H_est from a file
   call get_param(param_file, mdl, "INPUTDIR", inputdir, default=".")
@@ -212,6 +218,18 @@ logical function EBM_init(param_file, G, GV, diag, CS)
     deallocate(ig, jg, new_depth)
   endif
 
+  ! TODO: revisit H_U and H_L later with limiters?
+  do j=G%jsc,G%jec
+    do i=G%isc,G%iec
+      if (G%mask2dT(i,j)>0.) then
+        CS%H_U(i,j) = CS%H_est(i,j) * 0.5
+        CS%H_L(i,j) = CS%H_est(i,j) * 0.5
+        CS%wf_U(i,j,1) = 1.0/CS%H_U(i,j)
+        CS%wf_L(i,j,2) = 1.0/CS%H_L(i,j)
+      endif
+    enddo
+  enddo
+
   ! Post the static estuary depth field
   id = register_static_field('ocean_model', 'ebm_depth', diag%axesT1, &
         'Estuary averaged depth used by the EBM', 'm')
@@ -260,7 +278,7 @@ subroutine calculate_EBM(CS, i, j, lrunoff, EnthalpyConst, netMassIn, T2d_col, S
   ! Compute salinity of lower layer [S ~> ppt]
   ! s_l = get_lower_layer_salinity(S_col, h2d_col)
 
-  ! Distribute river runoff over the first 4 layers
+  ! Distribute river runoff over upper layer
   do k = 1, size(T2d_col)
     dThickness = lrunoff * 0.25  ! Each of the 4 layers receives 1/4 of the runoff
     dTemp = 0.
