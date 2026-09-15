@@ -1010,7 +1010,7 @@ subroutine applyBoundaryFluxesInOut(CS, G, GV, US, dt, fluxes, optics, nsw, h, t
         ! GMM, TODO: workout how to specify the number of vertical layers
         if (CS%use_EBM) &
           call calculate_EBM(CS%EBM_CS, i, j, fluxes%lrunoff(i,j), EnthalpyConst, &
-                             netMassIn(i), T2d(i,1:4), tv%S(i,j,1:4), h2d(i,1:4))
+                             netMassIn(i), T2d(i,:), tv%S(i,j,:), h2d(i,:))
 
         ! A/ Update mass, temp, and salinity due to incoming mass flux.
         do k=1,1

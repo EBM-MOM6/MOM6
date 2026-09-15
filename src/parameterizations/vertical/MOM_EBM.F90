@@ -222,18 +222,31 @@ logical function EBM_init(param_file, G, GV, diag, CS)
   do j=G%jsc,G%jec
     do i=G%isc,G%iec
       if (G%mask2dT(i,j)>0.) then
-        CS%H_U(i,j) = CS%H_est(i,j) * 0.5
-        CS%H_L(i,j) = CS%H_est(i,j) * 0.5
+        if (CS%H_est(i,j) <= G%bathyT(i,j)) then
+          CS%H_U(i,j) = CS%H_est(i,j) * 0.5
+          CS%H_L(i,j) = CS%H_est(i,j) * 0.5
+        else
+          CS%H_U(i,j) = G%bathyT(i,j) * 0.5
+          CS%H_L(i,j) = G%bathyT(i,j) * 0.5
+        endif
         CS%wf_U(i,j,1) = 1.0/CS%H_U(i,j)
         CS%wf_L(i,j,2) = 1.0/CS%H_L(i,j)
       endif
     enddo
   enddo
 
-  ! Post the static estuary depth field
+  ! Post the static estuary depth fields
   id = register_static_field('ocean_model', 'ebm_depth', diag%axesT1, &
         'Estuary averaged depth used by the EBM', 'm')
   if (id > 0) call post_data(id, CS%H_est, diag, .true.)
+
+  id = register_static_field('ocean_model', 'ebm_H_U', diag%axesT1, &
+        'EBM upper layer thickness', 'm')
+  if (id > 0) call post_data(id, CS%H_U, diag, .true.)
+
+  id = register_static_field('ocean_model', 'ebm_H_L', diag%axesT1, &
+        'EBM lower layer thickness', 'm')
+  if (id > 0) call post_data(id, CS%H_L, diag, .true.)
 
 end function EBM_init
 
@@ -250,28 +263,56 @@ subroutine calculate_EBM(CS, i, j, lrunoff, EnthalpyConst, netMassIn, T2d_col, S
   real,         intent(in)    :: lrunoff       !< River runoff for this column [H ~> m or kg m-2]
   real,         intent(in)    :: EnthalpyConst !< Enthalpy constant [nondim]
   real,         intent(inout) :: netMassIn     !< Net mass entering this column [H ~> m or kg m-2]
-  real,         intent(inout) :: T2d_col(:)    !< Temperature in first 4 layers [C ~> degC]
-  real,         intent(inout) :: S_col(:)      !< Salinity in first 4 layers [S ~> ppt]
-  real,         intent(inout) :: h2d_col(:)    !< Layer thickness in first 4 layers [H ~> m or kg m-2]
+  real,         intent(inout) :: T2d_col(:)    !< Temperature in the column [C ~> degC]
+  real,         intent(inout) :: S_col(:)      !< Salinity in the column [S ~> ppt]
+  real,         intent(inout) :: h2d_col(:)    !< Layer thickness in the column [H ~> m or kg m-2]
 
   ! local variables
-  real :: Q_u        ! EBM upper layer volume flux [m3 s-1]
-  real :: Q_l        ! EBM lower layer volume flux [m3 s-1]
-  real :: S_l        ! EBM lower layer salinity    [S ~> ppt]
-  real :: S_u        ! EBM upper layer salinity [S ~> ppt]
-  real :: dThickness ! Change in layer thickness [H ~> m or kg m-2]
-  real :: dTemp      ! Integrated change in layer temperature [C H ~> degC m or degC kg m-2]
-  real :: dSalt      ! Integrated change in layer salinity [S H ~> ppt m or ppt kg m-2]
-  real :: Temp_in    ! Temperature of the incoming mass flux [C ~> degC]
-  real :: Salin_in   ! Salinity of the incoming mass flux [S ~> ppt]
-  real :: hOld       ! Original layer thickness before update [H ~> m or kg m-2]
-  real :: Ithickness ! Inverse of the updated layer thickness [H-1 ~> m-1 or m2 kg-1]
-  integer :: k       ! Layer index [nondim]
-  real, dimension(2) :: dz_ebm ! EBM layer thicknesses [m]
+  real :: Q_u        !< EBM upper layer volume flux [m3 s-1]
+  real :: Q_l        !< EBM lower layer volume flux [m3 s-1]
+  real :: S_l        !< EBM lower layer salinity    [S ~> ppt]
+  real :: S_u        !< EBM upper layer salinity [S ~> ppt]
+  real :: dThickness !< Change in layer thickness [H ~> m or kg m-2]
+  real :: dTemp      !< Integrated change in layer temperature [C H ~> degC m or degC kg m-2]
+  real :: dSalt      !< Integrated change in layer salinity [S H ~> ppt m or ppt kg m-2]
+  real :: Temp_in    !< Temperature of the incoming mass flux [C ~> degC]
+  real :: Salin_in   !< Salinity of the incoming mass flux [S ~> ppt]
+  real :: hOld       !< Original layer thickness before update [H ~> m or kg m-2]
+  real :: Ithickness !< Inverse of the updated layer thickness [H-1 ~> m-1 or m2 kg-1]
+  integer, parameter :: nz_ebm = 2  !< Number of layers in the EBM grid  [nondim]
+  integer :: nz      !< Number of layers in the native grid  [nondim]
+  integer :: k       !< Layer index [nondim]
+  real, dimension(nz_ebm) :: dz_ebm !< EBM layer thicknesses [m]
+  real, dimension(nz_ebm) :: ebm_wf_U  !< EBM weighting function upper layer (pointwise) [m]
+  real, dimension(nz_ebm) :: ebm_wf_L  !< EBM weighting function lower layer (pointwise) [m]
+  real, allocatable :: wf_U(:)         !< Weighting function upper layer native grid (pointwise) [m]
+  real, allocatable :: wf_L(:)         !< Weighting function lower layer native grid (pointwise) [m]
 
-  ! EBM grid
+  ! Vertical grid EBM
   dz_ebm(1) = CS%H_U(i,j)
   dz_ebm(2) = CS%H_L(i,j)
+
+  ! Weighting functions EBM
+  ebm_wf_U(1) = CS%wf_U(i,j,1)
+  ebm_wf_U(2) = CS%wf_U(i,j,2)
+  ebm_wf_L(1) = CS%wf_L(i,j,1)
+  ebm_wf_L(2) = CS%wf_L(i,j,2)
+
+  ! Weighting functions native
+
+  ! Number of layers in the native grid
+  nz = size(T2d_col)
+  ! ke = 4 ! for testing
+
+  ! allocate arrays
+  allocate(wf_U(nz), source=0.0)
+  allocate(wf_L(nz), source=0.0)
+
+  ! 1) Distribute river runoff over upper layer
+
+  ! 1a) remap weighting functions
+  call remapping_core_h(CS%remap_cs, nz_ebm, dz_ebm(:), ebm_wf_U(:), nz, h2d_col(:), wf_U(:))
+  call check_wf_integral(nz, wf_U, h2d_col)
 
   ! GMM, TODO: need to specify Hu, instead of hard code thickness...
 
@@ -279,8 +320,9 @@ subroutine calculate_EBM(CS, i, j, lrunoff, EnthalpyConst, netMassIn, T2d_col, S
   ! s_l = get_lower_layer_salinity(S_col, h2d_col)
 
   ! Distribute river runoff over upper layer
-  do k = 1, size(T2d_col)
-    dThickness = lrunoff * 0.25  ! Each of the 4 layers receives 1/4 of the runoff
+  do k = 1, nz
+    !dThickness = lrunoff * 0.25  ! Each of the 4 layers receives 1/4 of the runoff
+    dThickness = lrunoff * wf_U(k)  ! Each of the 4 layers receives 1/4 of the runoff
     dTemp = 0.
     dSalt = 0.
 
@@ -303,6 +345,31 @@ subroutine calculate_EBM(CS, i, j, lrunoff, EnthalpyConst, netMassIn, T2d_col, S
   !call estuary_box_model(CS, lrunoff, S_l, Q_u, Q_l, S_u)
 
 end subroutine calculate_EBM
+
+!> Check that SUM(wf(k)*h(k), k=1..nz) = 1.
+!! After remapping, the integral of the weighting function over the native grid
+!! must equal 1 to ensure conservation. If not, a FATAL error is issued.
+subroutine check_wf_integral(nz, wf, h)
+  integer, intent(in) :: nz    !< Number of layers [nondim]
+  real,    intent(in) :: wf(:) !< Weighting function [m-1]
+  real,    intent(in) :: h(:)  !< Layer thicknesses [m]
+
+  ! local variables
+  real, parameter :: tol = 1.0e-10 ! Tolerance for the integral check [nondim]
+  real    :: integral ! Integral of wf over the column [nondim]
+  integer :: k       ! Layer index [nondim]
+
+  integral = 0.0
+  do k = 1, nz
+    integral = integral + wf(k) * h(k)
+  enddo
+
+  if (abs(integral - 1.0) > tol) then
+    call MOM_error(FATAL, "MOM_EBM check_wf_integral: "//&
+         "SUM(wf*h) is not 1. The remapped weighting function is not conservative.")
+  endif
+
+end subroutine check_wf_integral
 
 !> Reads the parameter "USE_EBM" and returns state.
 !! This function allows other modules to know whether this parameterization will
