@@ -1531,7 +1531,7 @@ subroutine diabatic_aux_init(Time, G, GV, US, param_file, diag, CS, useALEalgori
   endif
 
   call get_param(param_file, mdl, "USE_EBM", CS%use_EBM, default=.false., do_not_log=.true.)
-  if (CS%use_EBM) CS%use_EBM = EBM_init(param_file, G, GV, CS%EBM_CS)
+  if (CS%use_EBM) CS%use_EBM = EBM_init(param_file, G, GV, diag, CS%EBM_CS)
 
   id_clock_uv_at_h = cpu_clock_id('(Ocean find_uv_at_h)', grain=CLOCK_ROUTINE)
   id_clock_frazil  = cpu_clock_id('(Ocean frazil)', grain=CLOCK_ROUTINE)

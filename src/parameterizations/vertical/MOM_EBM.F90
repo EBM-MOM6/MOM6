@@ -9,6 +9,7 @@
 !! https://doi.org/10.1016/j.ocemod.2017.03.004
 module MOM_EBM
 
+use MOM_diag_mediator,         only : post_data, register_static_field, diag_ctrl
 use MOM_error_handler,         only : MOM_error, WARNING, FATAL, is_root_pe
 use MOM_file_parser,           only : get_param, log_version, param_file_type
 use MOM_grid,                  only : ocean_grid_type
@@ -54,11 +55,12 @@ contains
 
 !> Initializes the estuary box model parameterization.
 !! Returns .true. if the parameterization is enabled.
-logical function EBM_init(param_file, G, GV, CS)
+logical function EBM_init(param_file, G, GV, diag, CS)
 
   type(param_file_type),  intent(in)    :: param_file !< Run-time parameter file handle
   type(ocean_grid_type),  intent(in)    :: G          !< The ocean's grid structure
   type(verticalGrid_type), intent(in)   :: GV         !< The ocean's vertical grid structure
+  type(diag_ctrl), target, intent(inout) :: diag      !< Structure used to regulate diagnostic output
   type(EBM_cs),           intent(inout) :: CS         !< EBM control structure
 
   ! local variables
@@ -69,6 +71,7 @@ logical function EBM_init(param_file, G, GV, CS)
   logical            :: om4_remap_via_sub_cells ! Use the OM4-era remap_via_sub_cells
   real, dimension(:), allocatable :: new_depth ! The new values of estuary depth [m]
   integer, dimension(:), allocatable :: ig, jg ! The global indices of points to modify
+  integer :: id                              ! Diagnostic id for static fields
   integer :: i, j, n, ncid, n_edits, i_file, j_file, ndims, sizes(8)
 
   ! This include declares and sets the variable "version".
@@ -208,6 +211,11 @@ logical function EBM_init(param_file, G, GV, CS)
 
     deallocate(ig, jg, new_depth)
   endif
+
+  ! Post the static estuary depth field
+  id = register_static_field('ocean_model', 'ebm_depth', diag%axesT1, &
+        'Estuary averaged depth used by the EBM', 'm')
+  if (id > 0) call post_data(id, CS%H_est, diag, .true.)
 
 end function EBM_init
 
