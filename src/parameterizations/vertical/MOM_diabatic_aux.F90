@@ -23,7 +23,7 @@ use MOM_opacity,       only : set_opacity, opacity_CS, extract_optics_slice, ext
 use MOM_opacity,       only : optics_type, optics_nbands, absorbRemainingSW, sumSWoverBands
 use MOM_tracer_flow_control, only : get_chl_from_model, tracer_flow_control_CS
 use MOM_unit_scaling,  only : unit_scale_type
-use MOM_EBM,           only : EBM_init, calculate_EBM, EBM_cs
+use MOM_EBM,           only : EBM_init, calculate_EBM, EBM_cs, post_EBM_diagnostics
 use MOM_variables,     only : thermo_var_ptrs
 use MOM_verticalGrid,  only : verticalGrid_type
 
@@ -1007,11 +1007,10 @@ subroutine applyBoundaryFluxesInOut(CS, G, GV, US, dt, fluxes, optics, nsw, h, t
         ! Distributes river runoff vertically and apply the estuary box model
         ! parameterization if enabled.
         ! This only works if aggregate_FW_forcing = False.
-        ! GMM, TODO: workout how to specify the number of vertical layers
-        if (CS%use_EBM) &
-          call calculate_EBM(CS%EBM_CS, i, j, fluxes%lrunoff(i,j), EnthalpyConst, &
+        if (CS%use_EBM .and. (fluxes%lrunoff(i,j) > 0.0)) then
+          call calculate_EBM(CS%EBM_CS, G, i, j, Idt, fluxes%lrunoff(i,j), EnthalpyConst, &
                              netMassIn(i), T2d(i,:), tv%S(i,j,:), h2d(i,:))
-
+        endif
         ! A/ Update mass, temp, and salinity due to incoming mass flux.
         do k=1,1
 
@@ -1336,6 +1335,7 @@ subroutine applyBoundaryFluxesInOut(CS, G, GV, US, dt, fluxes, optics, nsw, h, t
   if (CS%id_penSW_diag     > 0) call post_data(CS%id_penSW_diag    , CS%penSW_diag    , CS%diag)
   if (CS%id_penSWflux_diag > 0) call post_data(CS%id_penSWflux_diag, CS%penSWflux_diag, CS%diag)
   if (CS%id_nonpenSW_diag  > 0) call post_data(CS%id_nonpenSW_diag , CS%nonpenSW_diag , CS%diag)
+  if (CS%use_EBM) call post_EBM_diagnostics(CS%EBM_CS)
 
 ! The following check will be ignored if ignore_fluxes_over_land = true
   if ((numberOfGroundings > 0) .and. .not.CS%ignore_fluxes_over_land) then
@@ -1531,7 +1531,7 @@ subroutine diabatic_aux_init(Time, G, GV, US, param_file, diag, CS, useALEalgori
   endif
 
   call get_param(param_file, mdl, "USE_EBM", CS%use_EBM, default=.false., do_not_log=.true.)
-  if (CS%use_EBM) CS%use_EBM = EBM_init(param_file, G, GV, diag, CS%EBM_CS)
+  if (CS%use_EBM) CS%use_EBM = EBM_init(Time, param_file, G, GV, diag, CS%EBM_CS)
 
   id_clock_uv_at_h = cpu_clock_id('(Ocean find_uv_at_h)', grain=CLOCK_ROUTINE)
   id_clock_frazil  = cpu_clock_id('(Ocean frazil)', grain=CLOCK_ROUTINE)
