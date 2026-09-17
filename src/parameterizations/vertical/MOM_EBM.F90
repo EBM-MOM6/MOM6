@@ -10,12 +10,13 @@
 module MOM_EBM
 
 use MOM_diag_mediator,         only : post_data, register_static_field, diag_ctrl
+use MOM_diag_mediator,         only : register_diag_field, time_type
 use MOM_error_handler,         only : MOM_error, WARNING, FATAL, is_root_pe
 use MOM_file_parser,           only : get_param, log_version, param_file_type
 use MOM_grid,                  only : ocean_grid_type
 use MOM_io,                    only : file_exists, field_size, open_file_to_read
 use MOM_io,                    only : close_file_to_read, read_variable, stdout, slasher
-use MOM_remapping,             only : remapping_CS, initialize_remapping, reintegrate_column
+use MOM_remapping,             only : remapping_CS, initialize_remapping
 use MOM_remapping,             only : extract_member_remapping_CS, remapping_core_h
 use MOM_remapping,             only : remappingSchemesDoc, remappingDefaultScheme
 use MOM_verticalGrid,          only : verticalGrid_type
@@ -24,7 +25,7 @@ use MOM_verticalGrid,          only : verticalGrid_type
 
 implicit none ; private
 
-public EBM_init, calculate_EBM, EBM_is_used
+public EBM_init, calculate_EBM, EBM_is_used, post_EBM_diagnostics
 
 !> Control structure including parameters for the estuary box model.
 type, public :: EBM_cs ; private
@@ -39,15 +40,27 @@ type, public :: EBM_cs ; private
   real :: rho_ref    !< Reference density for linear equation of state [kg m-3]
   real :: beta_S   !< Saline contraction coefficient [ppt-1]
   real :: Sc       !< Schmidt number [nondim]
+  logical :: do_exchange !< If true, apply the EBM exchange flow [nondim]
   real, allocatable, dimension(:,:) :: H_est !< Estuary averaged depth [m]
   real, allocatable, dimension(:,:) :: H_U  !< Thickness of EBM discharge into MOM6 (upper) [m]
   real, allocatable, dimension(:,:) :: H_L  !< Thickness of MOM6 discharging to EBM (lower) [m]
-  real, allocatable, dimension(:,:,:) :: wf_U !< Weighting function for the upper layer [nondim]
-  real, allocatable, dimension(:,:,:) :: wf_L !< Weighting function for the lower layer [nondim]
+  real, allocatable, dimension(:,:,:) :: wf_U !< Weighting function for the upper layer [m-1]
+  real, allocatable, dimension(:,:,:) :: wf_L !< Weighting function for the lower layer [m-1]
   integer :: deg              !< Degree of polynomial reconstruction [nondim]
   real    :: H_subroundoff   !< A thickness that is so small that it can be added to a thickness of
                              !! Angstrom or larger without changing it at the bit level [H ~> m or kg m-2].
   type(remapping_CS)                :: remap_CS !< Control structure to hold remapping configuration.
+  type(diag_ctrl), pointer :: diag => NULL() !< Structure used to regulate diagnostic output
+  integer :: id_ebm_S_upper = -1 !< Diagnostic ID for EBM upper layer salinity
+  integer :: id_ebm_S_lower = -1 !< Diagnostic ID for EBM lower layer salinity
+  integer :: id_ebm_Q_u = -1     !< Diagnostic ID for EBM upper layer volume flux
+  integer :: id_ebm_Q_l = -1     !< Diagnostic ID for EBM lower layer volume flux
+  integer :: id_ebm_S_u = -1     !< Diagnostic ID for EBM upper layer outflow salinity
+  real, allocatable, dimension(:,:) :: ebm_S_upper !< EBM upper layer salinity [S ~> ppt]
+  real, allocatable, dimension(:,:) :: ebm_S_lower !< EBM lower layer salinity [S ~> ppt]
+  real, allocatable, dimension(:,:) :: ebm_Q_u     !< EBM upper layer volume flux [m3 s-1]
+  real, allocatable, dimension(:,:) :: ebm_Q_l     !< EBM lower layer volume flux [m3 s-1]
+  real, allocatable, dimension(:,:) :: ebm_S_u     !< EBM upper layer outflow salinity [S ~> ppt]
 
 end type EBM_cs
 
@@ -57,8 +70,9 @@ contains
 
 !> Initializes the estuary box model parameterization.
 !! Returns .true. if the parameterization is enabled.
-logical function EBM_init(param_file, G, GV, diag, CS)
+logical function EBM_init(Time, param_file, G, GV, diag, CS)
 
+  type(time_type), target, intent(in)    :: Time      !< The current model time
   type(param_file_type),  intent(in)    :: param_file !< Run-time parameter file handle
   type(ocean_grid_type),  intent(in)    :: G          !< The ocean's grid structure
   type(verticalGrid_type), intent(in)   :: GV         !< The ocean's vertical grid structure
@@ -87,6 +101,9 @@ logical function EBM_init(param_file, G, GV, diag, CS)
                  default=.false.)
 
   if (.not. EBM_init) return
+
+  if (.not.GV%Boussinesq) call MOM_error(FATAL, trim(mdl)// &
+       ": the EBM parameterization currently requires Boussinesq mode.")
 
   call get_param(param_file, mdl, "EBM_TIDAL_AMPLITUDE", CS%tide_amp, &
                  "Averaged tidal amplitude at the estuary mouth.", &
@@ -128,6 +145,11 @@ logical function EBM_init(param_file, G, GV, diag, CS)
                  "Schmidt number used in the EBM.", &
                  units="nondim", default=2.2)
 
+  call get_param(param_file, mdl, "EBM_EXCHANGE", CS%do_exchange, &
+                 "If true, apply the EBM exchange flow between the upper "//&
+                 "and lower estuary layers.", &
+                 default=.true.)
+
   ! Remapping initialization
   CS%H_subroundoff = GV%H_subroundoff
   call get_param(param_file, mdl, "EBM_BOUNDARY_EXTRAP", boundary_extrap, &
@@ -154,8 +176,8 @@ logical function EBM_init(param_file, G, GV, diag, CS)
   allocate(CS%H_est(SZI_(G),SZJ_(G)))
   allocate(CS%H_U(SZI_(G),SZJ_(G)))
   allocate(CS%H_L(SZI_(G),SZJ_(G)))
-  allocate(CS%wf_U(SZI_(G),SZJ_(G),2))
-  allocate(CS%wf_L(SZI_(G),SZJ_(G),2))
+  allocate(CS%wf_U(SZI_(G),SZJ_(G),3))
+  allocate(CS%wf_L(SZI_(G),SZJ_(G),3))
   CS%H_est(:,:) = CS%H
   CS%H_U(:,:) = 0.0
   CS%H_L(:,:) = 0.0
@@ -231,6 +253,8 @@ logical function EBM_init(param_file, G, GV, diag, CS)
         endif
         CS%wf_U(i,j,1) = 1.0/CS%H_U(i,j)
         CS%wf_L(i,j,2) = 1.0/CS%H_L(i,j)
+        CS%wf_U(i,j,3) = 0.0
+        CS%wf_L(i,j,3) = 0.0
       endif
     enddo
   enddo
@@ -248,19 +272,49 @@ logical function EBM_init(param_file, G, GV, diag, CS)
         'EBM lower layer thickness', 'm')
   if (id > 0) call post_data(id, CS%H_L, diag, .true.)
 
+  ! Register time-dependent EBM diagnostics
+  CS%diag => diag
+  CS%id_ebm_S_upper = register_diag_field('ocean_model', 'ebm_S_upper', diag%axesT1, &
+        Time, 'EBM upper layer salinity', 'ppt')
+  if (CS%id_ebm_S_upper > 0) then
+    allocate(CS%ebm_S_upper(SZI_(G),SZJ_(G)), source=0.0)
+  endif
+  CS%id_ebm_S_lower = register_diag_field('ocean_model', 'ebm_S_lower', diag%axesT1, &
+        Time, 'EBM lower layer salinity', 'ppt')
+  if (CS%id_ebm_S_lower > 0) then
+    allocate(CS%ebm_S_lower(SZI_(G),SZJ_(G)), source=0.0)
+  endif
+  CS%id_ebm_Q_u = register_diag_field('ocean_model', 'ebm_Q_u', diag%axesT1, &
+        Time, 'EBM upper layer volume flux', 'm3 s-1')
+  if (CS%id_ebm_Q_u > 0) then
+    allocate(CS%ebm_Q_u(SZI_(G),SZJ_(G)), source=0.0)
+  endif
+  CS%id_ebm_Q_l = register_diag_field('ocean_model', 'ebm_Q_l', diag%axesT1, &
+        Time, 'EBM lower layer volume flux', 'm3 s-1')
+  if (CS%id_ebm_Q_l > 0) then
+    allocate(CS%ebm_Q_l(SZI_(G),SZJ_(G)), source=0.0)
+  endif
+  CS%id_ebm_S_u = register_diag_field('ocean_model', 'ebm_S_u', diag%axesT1, &
+        Time, 'EBM upper layer outflow salinity', 'ppt')
+  if (CS%id_ebm_S_u > 0) then
+    allocate(CS%ebm_S_u(SZI_(G),SZJ_(G)), source=0.0)
+  endif
+
 end function EBM_init
 
-!> Calculates estuary box model exchange and distributes river runoff over the
-!! first 4 layers, updating layer thickness, temperature, salinity, and net mass flux.
+!> Calculates estuary box model exchange and distributes river runoff using
+!! weighting functions, updating layer thickness, temperature, salinity, and net mass flux.
 !! The estuary exchange fluxes (Q_u, Q_l, S_u) are computed by estuary_box_model
 !! using the EBM parameters in CS together with the provided river discharge and
 !! lower-layer salinity.
-subroutine calculate_EBM(CS, i, j, lrunoff, EnthalpyConst, netMassIn, T2d_col, S_col, h2d_col)
+subroutine calculate_EBM(CS, G, i, j, Idt, lrunoff, EnthalpyConst, netMassIn, T2d_col, S_col, h2d_col)
 
-  type(EBM_cs), intent(in)    :: CS            !< EBM control structure
-  integer,      intent(in)    :: i             !< i-index of the current column [nondim]
-  integer,      intent(in)    :: j             !< j-index of the current column [nondim]
-  real,         intent(in)    :: lrunoff       !< River runoff for this column [H ~> m or kg m-2]
+  type(EBM_cs), intent(inout)   :: CS            !< EBM control structure
+  type(ocean_grid_type), intent(in) :: G          !< The ocean's grid structure
+  integer,      intent(in)      :: i             !< i-index of the current column [nondim]
+  integer,      intent(in)      :: j             !< j-index of the current column [nondim]
+  real,         intent(in)      :: Idt           !< The inverse of the timestep [T-1 ~> s-1]
+  real,         intent(in)      :: lrunoff       !< River runoff for this column [H ~> m or kg m-2]
   real,         intent(in)    :: EnthalpyConst !< Enthalpy constant [nondim]
   real,         intent(inout) :: netMassIn     !< Net mass entering this column [H ~> m or kg m-2]
   real,         intent(inout) :: T2d_col(:)    !< Temperature in the column [C ~> degC]
@@ -275,29 +329,42 @@ subroutine calculate_EBM(CS, i, j, lrunoff, EnthalpyConst, netMassIn, T2d_col, S
   real :: dThickness !< Change in layer thickness [H ~> m or kg m-2]
   real :: dTemp      !< Integrated change in layer temperature [C H ~> degC m or degC kg m-2]
   real :: dSalt      !< Integrated change in layer salinity [S H ~> ppt m or ppt kg m-2]
+  real :: sum_dThickness !< Accumulated thickness change over the column [H ~> m or kg m-2]
+  real :: sum_dTemp      !< Accumulated temperature content change over the column [C H ~> degC m]
+  real :: sum_dSalt      !< Accumulated salt content change over the column [S H ~> ppt m]
   real :: Temp_in    !< Temperature of the incoming mass flux [C ~> degC]
   real :: Salin_in   !< Salinity of the incoming mass flux [S ~> ppt]
   real :: hOld       !< Original layer thickness before update [H ~> m or kg m-2]
   real :: Ithickness !< Inverse of the updated layer thickness [H-1 ~> m-1 or m2 kg-1]
-  integer, parameter :: nz_ebm = 2  !< Number of layers in the EBM grid  [nondim]
+  !real :: scale_factor_fw !< Scale factor to convert fw mass flux (kg m-2 s-1) to volume flux (m3 s-1)
+  !real :: scale_factor_sw !< Scale factor to convert sw exchange mass flux (kg m-2 s-1) to volume flux (m3 s-1)
+  integer, parameter :: nz_ebm = 3  !< Number of layers in the EBM grid + 1  [nondim]
+                                    !! The extra layer is needed to avoid propagating the lower layer value.
   integer :: nz      !< Number of layers in the native grid  [nondim]
   integer :: k       !< Layer index [nondim]
+
   real, dimension(nz_ebm) :: dz_ebm !< EBM layer thicknesses [m]
-  real, dimension(nz_ebm) :: ebm_wf_U  !< EBM weighting function upper layer (pointwise) [m]
-  real, dimension(nz_ebm) :: ebm_wf_L  !< EBM weighting function lower layer (pointwise) [m]
-  real, allocatable :: wf_U(:)         !< Weighting function upper layer native grid (pointwise) [m]
-  real, allocatable :: wf_L(:)         !< Weighting function lower layer native grid (pointwise) [m]
+  real, dimension(nz_ebm) :: ebm_wf_U  !< EBM weighting function upper layer (pointwise) [m-1]
+  real, dimension(nz_ebm) :: ebm_wf_L  !< EBM weighting function lower layer (pointwise) [m-1]
+  real, dimension(nz_ebm) :: ebm_S     !<  Salinity in the column on the EBM grid [S ~> ppt]
+  real, dimension(nz_ebm) :: ebm_T     !<  Temperature in the column on the EBM grid [C ~> degC]
+  real, allocatable :: wf_U(:)         !< Weighting function upper layer native grid (pointwise) [m-1]
+  real, allocatable :: wf_L(:)         !< Weighting function lower layer native grid (pointwise) [m-1]
+  real :: integral_U  !< Sum of wf_U over the column, used for normalization [nondim]
+  real :: integral_L  !< Sum of wf_L over the column, used for normalization [nondim]
 
   ! Vertical grid EBM
   dz_ebm(1) = CS%H_U(i,j)
   dz_ebm(2) = CS%H_L(i,j)
+  dz_ebm(3) = 1.0E4 ! avoid propagating the lower layer value.
 
   ! Weighting functions EBM
   ebm_wf_U(1) = CS%wf_U(i,j,1)
   ebm_wf_U(2) = CS%wf_U(i,j,2)
   ebm_wf_L(1) = CS%wf_L(i,j,1)
   ebm_wf_L(2) = CS%wf_L(i,j,2)
-
+  ebm_wf_U(3) = CS%wf_U(i,j,3)
+  ebm_wf_L(3) = CS%wf_L(i,j,3)
   ! Weighting functions native
 
   ! Number of layers in the native grid
@@ -312,22 +379,58 @@ subroutine calculate_EBM(CS, i, j, lrunoff, EnthalpyConst, netMassIn, T2d_col, S
 
   ! 1a) remap weighting functions
   call remapping_core_h(CS%remap_cs, nz_ebm, dz_ebm(:), ebm_wf_U(:), nz, h2d_col(:), wf_U(:))
-  call check_wf_integral(nz, wf_U, h2d_col)
+  call remapping_core_h(CS%remap_cs, nz_ebm, dz_ebm(:), ebm_wf_L(:), nz, h2d_col(:), wf_L(:))
 
-  ! GMM, TODO: need to specify Hu, instead of hard code thickness...
+  ! Multiply weights by layer thickness to make them nondim
+  do k = 1, nz
+    wf_U(k) = wf_U(k) * h2d_col(k)
+    wf_L(k) = wf_L(k) * h2d_col(k)
+  enddo
 
-  ! Compute salinity of lower layer [S ~> ppt]
-  ! s_l = get_lower_layer_salinity(S_col, h2d_col)
+  ! check that the SUM(wf_U) is 1.
+  call check_wf_integral(G, i, j, nz_ebm, dz_ebm, ebm_wf_U, nz, h2d_col, wf_U, 'wf_U')
+  call check_wf_integral(G, i, j, nz_ebm, dz_ebm, ebm_wf_L, nz, h2d_col, wf_L, 'wf_L')
+
+  ! Normalize weighting functions to sum exactly to 1 to prevent
+  ! floating-point drift from accumulating into conservation errors.
+  integral_U = 0.0
+  integral_L = 0.0
+  do k = 1, nz
+    integral_U = integral_U + wf_U(k)
+    integral_L = integral_L + wf_L(k)
+  enddo
+  do k = 1, nz
+    wf_U(k) = wf_U(k) / integral_U
+    wf_L(k) = wf_L(k) / integral_L
+  enddo
+
+  ! Compute salinity on EBM grid [S ~> ppt]
+  call remapping_core_h(CS%remap_cs, nz, h2d_col(:), S_col(:), nz_ebm, dz_ebm(:), ebm_S(:))
+  call remapping_core_h(CS%remap_cs, nz, h2d_col(:), T2d_col(:), nz_ebm, dz_ebm(:), ebm_T(:))
+
+  ! Store EBM layer salinities for diagnostics
+  if (CS%id_ebm_S_upper > 0) CS%ebm_S_upper(i,j) = ebm_S(1)
+  if (CS%id_ebm_S_lower > 0) CS%ebm_S_lower(i,j) = ebm_S(2)
+
+  ! initialize accumulators
+  sum_dThickness = 0.0
 
   ! Distribute river runoff over upper layer
   do k = 1, nz
     !dThickness = lrunoff * 0.25  ! Each of the 4 layers receives 1/4 of the runoff
-    dThickness = lrunoff * wf_U(k)  ! Each of the 4 layers receives 1/4 of the runoff
+    dThickness = lrunoff * wf_U(k)
+    sum_dThickness = sum_dThickness + dThickness
     dTemp = 0.
     dSalt = 0.
 
     netMassIn = netMassIn - dThickness
     Temp_in  = T2d_col(k)
+
+    ! GMM, TODO:
+    ! We will need to change how enthalpy is done with the EBM.
+    ! EnthalpyConst should be 1 and we need to remove the
+    ! heat_content_lrunoff from the coupler elsewhere.
+
     dTemp = dTemp + dThickness * Temp_in * EnthalpyConst
     ! GMM, this is not used. Delete?
     Salin_in = 0.0
@@ -341,35 +444,161 @@ subroutine calculate_EBM(CS, i, j, lrunoff, EnthalpyConst, netMassIn, T2d_col, S
     end if
   end do
 
-  ! GMM, todo
-  !call estuary_box_model(CS, lrunoff, S_l, Q_u, Q_l, S_u)
+  ! Check conservation of river input distribution
+  if (abs((sum_dThickness) - lrunoff) > 1.0e-10) then
+    if (is_root_pe()) then
+      write(stdout,'(A)') "=== MOM_EBM river input conservation FAILURE ==="
+      write(stdout,'(A,I6,A,I6)') "  i          : ", i, "  j : ", j
+      write(stdout,'(A,F12.4,A,F12.4)') "  lon        : ", G%geoLonT(i,j), &
+                                         "  lat : ", G%geoLatT(i,j)
+      write(stdout,'(A,ES15.8)') "  sum_dThickness - lrunoff : ", (sum_dThickness-lrunoff)
+      write(stdout,'(A,ES15.8)') "  sum_dThickness           : ", sum_dThickness
+      write(stdout,'(A,ES15.8)') "  lrunoff           : ", lrunoff
+      do k = 1, nz
+        write(stdout,'(A,I4,A,2ES15.8)') "    k=", k, " : ", wf_U(k), wf_L(k)
+      enddo
+      call MOM_error(FATAL, "MOM_EBM calculate_EBM: river input distribution is not conservative.")
+    endif
+  endif
+
+  ! 2) Exchange
+  if (CS%do_exchange) then
+
+    ! GMM, todo
+    ! EBM parameterization currently requires Boussinesq mode
+    ! Runoff is in m ==> converting to m3 s-1
+    call estuary_box_model(CS, G, i, j, lrunoff*G%areaT(i,j)*Idt, ebm_S(2), Q_u, Q_l, S_u)
+    ! GMM, TODO: S_u is masked out if lrunoff=0.
+
+    ! Store EBM exchange diagnostics
+    if (CS%id_ebm_Q_u > 0) CS%ebm_Q_u(i,j) = Q_u
+    if (CS%id_ebm_Q_l > 0) CS%ebm_Q_l(i,j) = Q_l
+    if (CS%id_ebm_S_u > 0) CS%ebm_S_u(i,j) = S_u
+
+    ! convert Q_U and Q_L back to m
+    Q_u = Q_u/(G%areaT(i,j)*Idt)
+    Q_l = Q_l/(G%areaT(i,j)*Idt)
+
+    ! Apply exchange flow
+
+    ! initialize accumulators
+    sum_dThickness = 0.0
+    sum_dTemp = 0.0
+    sum_dSalt = 0.0
+
+    ! 2a) Upper and Lower layer combined
+    do k = 1, nz
+      dThickness = Q_l * (wf_L(k) - wf_U(k))
+      dTemp = dThickness * ebm_T(2)
+      dSalt = dThickness * ebm_S(2)
+      sum_dThickness = sum_dThickness + dThickness
+      sum_dTemp = sum_dTemp + dTemp
+      sum_dSalt = sum_dSalt + dSalt
+      hOld = h2d_col(k)
+      h2d_col(k) = h2d_col(k) + dThickness
+      if (h2d_col(k) > 0.0) then
+        Ithickness = 1.0 / h2d_col(k)
+        if (dThickness /= 0. .or. dTemp /= 0.) T2d_col(k) = (hOld * T2d_col(k) + dTemp) * Ithickness
+        if (dThickness /= 0. .or. dSalt /= 0.) S_col(k)   = (hOld * S_col(k)   + dSalt) * Ithickness
+      end if
+    end do
+
+    ! Check conservation of exchange flow
+    if (abs(sum_dThickness) > 1.0e-10 .or. abs(sum_dTemp) > 1.0e-10 .or. abs(sum_dSalt) > 1.0e-10) then
+      if (is_root_pe()) then
+        write(stdout,'(A)') "=== MOM_EBM exchange conservation FAILURE ==="
+        write(stdout,'(A,I6,A,I6)') "  i          : ", i, "  j : ", j
+        write(stdout,'(A,F12.4,A,F12.4)') "  lon        : ", G%geoLonT(i,j), &
+                                           "  lat : ", G%geoLatT(i,j)
+        write(stdout,'(A,ES15.8)') "  sum_dThickness : ", sum_dThickness
+        write(stdout,'(A,ES15.8)') "  sum_dTemp      : ", sum_dTemp
+        write(stdout,'(A,ES15.8)') "  sum_dSalt      : ", sum_dSalt
+        write(stdout,'(A,ES15.8)') "  Q_l            : ", Q_l
+        do k = 1, nz
+          write(stdout,'(A,I4,A,2ES15.8)') "    k=", k, " : ", wf_U(k), wf_L(k)
+        enddo
+        call MOM_error(FATAL, "MOM_EBM calculate_EBM: exchange flow is not conservative.")
+      endif
+    endif
+
+  endif ! do_exchange
 
 end subroutine calculate_EBM
 
-!> Check that SUM(wf(k)*h(k), k=1..nz) = 1.
-!! After remapping, the integral of the weighting function over the native grid
-!! must equal 1 to ensure conservation. If not, a FATAL error is issued.
-subroutine check_wf_integral(nz, wf, h)
-  integer, intent(in) :: nz    !< Number of layers [nondim]
-  real,    intent(in) :: wf(:) !< Weighting function [m-1]
-  real,    intent(in) :: h(:)  !< Layer thicknesses [m]
+!> Check that SUM(wf(k), k=1..nz) = 1.
+!! After remapping and multiplication by layer thickness, the weighting function
+!! must sum to 1 to ensure conservation. If not, detailed debug info is printed
+!! on root PE and a FATAL error is issued.
+subroutine check_wf_integral(G, i, j, nz_ebm, dz_ebm, ebm_wf, nz, h, wf, varname)
+  type(ocean_grid_type), intent(in) :: G       !< The ocean's grid structure
+  integer,          intent(in) :: i            !< i-index of the current column [nondim]
+  integer,          intent(in) :: j            !< j-index of the current column [nondim]
+  integer,          intent(in) :: nz_ebm       !< Number of EBM layers [nondim]
+  real,             intent(in) :: dz_ebm(:)    !< EBM layer thicknesses [m]
+  real,             intent(in) :: ebm_wf(:)    !< Weighting function on EBM grid [m-1]
+  integer,          intent(in) :: nz           !< Number of native layers [nondim]
+  real,             intent(in) :: h(:)         !< Native layer thicknesses [m]
+  real,             intent(in) :: wf(:)        !< Remapped weighting function on native grid [nondim]
+  character(len=*), intent(in) :: varname      !< Name of the variable being checked
 
   ! local variables
   real, parameter :: tol = 1.0e-10 ! Tolerance for the integral check [nondim]
   real    :: integral ! Integral of wf over the column [nondim]
-  integer :: k       ! Layer index [nondim]
+  integer :: k        ! Layer index [nondim]
+  character(len=256) :: mesg ! Error message string
 
   integral = 0.0
   do k = 1, nz
-    integral = integral + wf(k) * h(k)
+    integral = integral + wf(k)
   enddo
 
   if (abs(integral - 1.0) > tol) then
-    call MOM_error(FATAL, "MOM_EBM check_wf_integral: "//&
-         "SUM(wf*h) is not 1. The remapped weighting function is not conservative.")
+    if (is_root_pe()) then
+      write(stdout,'(A)') "=== MOM_EBM check_wf_integral FAILURE ==="
+      write(stdout,'(A,A)')       "  variable   : ", trim(varname)
+      write(stdout,'(A,I6,A,I6)') "  i          : ", i, "  j : ", j
+      write(stdout,'(A,F12.4,A,F12.4)') "  lon        : ", G%geoLonT(i,j), &
+                                         "  lat : ", G%geoLatT(i,j)
+      write(stdout,'(A,I4)')      "  nz_ebm     : ", nz_ebm
+      write(stdout,'(A)')         "  dz_ebm     : "
+      do k = 1, nz_ebm
+        write(stdout,'(A,I4,A,ES15.8)') "    k=", k, " : ", dz_ebm(k)
+      enddo
+      write(stdout,'(A)')         "  ebm_wf     : "
+      do k = 1, nz_ebm
+        write(stdout,'(A,I4,A,ES15.8)') "    k=", k, " : ", ebm_wf(k)
+      enddo
+      write(stdout,'(A,I4)')      "  nz         : ", nz
+      write(stdout,'(A)')         "  h          : "
+      do k = 1, nz
+        write(stdout,'(A,I4,A,ES15.8)') "    k=", k, " : ", h(k)
+      enddo
+      write(stdout,'(A)')         "  wf         : "
+      do k = 1, nz
+        write(stdout,'(A,I4,A,ES15.8)') "    k=", k, " : ", wf(k)
+      enddo
+      write(mesg, '("SUM(wf) = ",ES15.8," differs from 1 by ",ES15.8," (tol = ",ES15.8,").")') &
+           integral, abs(integral - 1.0), tol
+      call MOM_error(FATAL, "MOM_EBM check_wf_integral: variable '"//trim(varname)//"': "//&
+           trim(mesg)//" The remapped weighting function is not conservative.")
+    endif
   endif
 
 end subroutine check_wf_integral
+
+
+!> Post time-dependent EBM diagnostics. This should be called after the
+!! column loop that calls calculate_EBM has completed.
+subroutine post_EBM_diagnostics(CS)
+  type(EBM_cs), intent(in) :: CS !< EBM control structure
+
+  if (CS%id_ebm_S_upper > 0) call post_data(CS%id_ebm_S_upper, CS%ebm_S_upper, CS%diag)
+  if (CS%id_ebm_S_lower > 0) call post_data(CS%id_ebm_S_lower, CS%ebm_S_lower, CS%diag)
+  if (CS%id_ebm_Q_u > 0) call post_data(CS%id_ebm_Q_u, CS%ebm_Q_u, CS%diag)
+  if (CS%id_ebm_Q_l > 0) call post_data(CS%id_ebm_Q_l, CS%ebm_Q_l, CS%diag)
+  if (CS%id_ebm_S_u > 0) call post_data(CS%id_ebm_S_u, CS%ebm_S_u, CS%diag)
+
+end subroutine post_EBM_diagnostics
 
 !> Reads the parameter "USE_EBM" and returns state.
 !! This function allows other modules to know whether this parameterization will
@@ -404,9 +633,12 @@ end function EBM_is_used
 !! A box model for representing estuarine physical processes in
 !! Earth system models. Ocean Modelling, 112, 139-153.
 !! https://doi.org/10.1016/j.ocemod.2017.03.004
-subroutine estuary_box_model(CS, Q_r, S_l, Q_u, Q_l, S_u)
+subroutine estuary_box_model(CS, G, ig, jg, Q_r, S_l, Q_u, Q_l, S_u)
 
   type(EBM_cs), intent(in)  :: CS   !< EBM control structure
+  type(ocean_grid_type), intent(in) :: G !< The ocean's grid structure
+  integer,      intent(in)  :: ig   !< i-index of the current column [nondim]
+  integer,      intent(in)  :: jg   !< j-index of the current column [nondim]
   real,         intent(in)  :: Q_r  !< River discharge [m3 s-1]
   real,         intent(in)  :: S_l  !< Salinity at estuary lower layer [ppt]
   real,         intent(out) :: Q_u  !< Upper layer volume flux [m3 s-1]
@@ -490,12 +722,58 @@ subroutine estuary_box_model(CS, Q_r, S_l, Q_u, Q_l, S_u)
   end do
 
   if (n == 0) then
-    call MOM_error(WARNING, "MOM_EBM estuary_box_model: no valid EBM solution found.")
+    if (is_root_pe()) then
+      write(stdout,'(A)') "=== MOM_EBM estuary_box_model: no valid EBM solution found ==="
+      write(stdout,'(A,I6,A,I6)') "  i          : ", ig, "  j : ", jg
+      write(stdout,'(A,F12.4,A,F12.4)') "  lon        : ", G%geoLonT(ig,jg), &
+                                         "  lat : ", G%geoLatT(ig,jg)
+      write(stdout,'(A,ES15.8)') "  Q_r        : ", Q_r
+      write(stdout,'(A,ES15.8)') "  S_l        : ", S_l
+      write(stdout,'(A,ES15.8)') "  tide_amp   : ", CS%tide_amp
+      write(stdout,'(A,ES15.8)') "  W_h        : ", CS%W_h
+      write(stdout,'(A,ES15.8)') "  H          : ", CS%H
+      write(stdout,'(A,ES15.8)') "  a1         : ", CS%a1
+      write(stdout,'(A,ES15.8)') "  a2         : ", CS%a2
+      write(stdout,'(A,ES15.8)') "  h0         : ", CS%h0
+      write(stdout,'(A,ES15.8)') "  g          : ", CS%g
+      write(stdout,'(A,ES15.8)') "  rho_ref    : ", CS%rho_ref
+      write(stdout,'(A,ES15.8)') "  beta_S     : ", CS%beta_S
+      write(stdout,'(A,ES15.8)') "  Sc         : ", CS%Sc
+      write(stdout,'(A,ES15.8)') "  R0         : ", R0
+      write(stdout,'(A,ES15.8)') "  T0         : ", T0
+      do i = 1, 3
+        write(stdout,'(A,I2,A,ES15.8,A,ES15.8)') "  root(", i, ") : ", roots(i,1), " + i*", roots(i,2)
+      enddo
+      call MOM_error(WARNING, "MOM_EBM estuary_box_model: no valid EBM solution found.")
+    endif
     ul0 = 0.0
   else if (n == 1) then
     ul0 = sum(roots(1:3,1) * real(mask))
   else
-    call MOM_error(WARNING, "MOM_EBM estuary_box_model: multiple valid EBM solutions found.")
+    if (is_root_pe()) then
+      write(stdout,'(A)') "=== MOM_EBM estuary_box_model: multiple valid EBM solutions found ==="
+      write(stdout,'(A,I6,A,I6)') "  i          : ", ig, "  j : ", jg
+      write(stdout,'(A,F12.4,A,F12.4)') "  lon        : ", G%geoLonT(ig,jg), &
+                                         "  lat : ", G%geoLatT(ig,jg)
+      write(stdout,'(A,ES15.8)') "  Q_r        : ", Q_r
+      write(stdout,'(A,ES15.8)') "  S_l        : ", S_l
+      write(stdout,'(A,ES15.8)') "  tide_amp   : ", CS%tide_amp
+      write(stdout,'(A,ES15.8)') "  W_h        : ", CS%W_h
+      write(stdout,'(A,ES15.8)') "  H          : ", CS%H
+      write(stdout,'(A,ES15.8)') "  a1         : ", CS%a1
+      write(stdout,'(A,ES15.8)') "  a2         : ", CS%a2
+      write(stdout,'(A,ES15.8)') "  h0         : ", CS%h0
+      write(stdout,'(A,ES15.8)') "  g          : ", CS%g
+      write(stdout,'(A,ES15.8)') "  rho_ref    : ", CS%rho_ref
+      write(stdout,'(A,ES15.8)') "  beta_S     : ", CS%beta_S
+      write(stdout,'(A,ES15.8)') "  Sc         : ", CS%Sc
+      write(stdout,'(A,ES15.8)') "  R0         : ", R0
+      write(stdout,'(A,ES15.8)') "  T0         : ", T0
+      do i = 1, 3
+        write(stdout,'(A,I2,A,ES15.8,A,ES15.8)') "  root(", i, ") : ", roots(i,1), " + i*", roots(i,2)
+      enddo
+      call MOM_error(WARNING, "MOM_EBM estuary_box_model: multiple valid EBM solutions found.")
+    endif
     ul0 = 0.0
   end if
 
