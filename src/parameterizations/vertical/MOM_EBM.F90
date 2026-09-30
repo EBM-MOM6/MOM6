@@ -328,7 +328,6 @@ subroutine calculate_EBM(CS, G, i, j, Idt, lrunoff, EnthalpyConst, netMassIn, T2
   ! local variables
   real :: Q_u        !< EBM upper layer volume flux [m3 s-1]
   real :: Q_l        !< EBM lower layer volume flux [m3 s-1]
-  real :: S_l        !< EBM lower layer salinity    [S ~> ppt]
   real :: S_u        !< EBM upper layer salinity [S ~> ppt]
   real :: dThickness !< Change in layer thickness [H ~> m or kg m-2]
   real :: dTemp      !< Integrated change in layer temperature [C H ~> degC m or degC kg m-2]
@@ -337,11 +336,8 @@ subroutine calculate_EBM(CS, G, i, j, Idt, lrunoff, EnthalpyConst, netMassIn, T2
   real :: sum_dTemp      !< Accumulated temperature content change over the column [C H ~> degC m]
   real :: sum_dSalt      !< Accumulated salt content change over the column [S H ~> ppt m]
   real :: Temp_in    !< Temperature of the incoming mass flux [C ~> degC]
-  real :: Salin_in   !< Salinity of the incoming mass flux [S ~> ppt]
   real :: hOld       !< Original layer thickness before update [H ~> m or kg m-2]
   real :: Ithickness !< Inverse of the updated layer thickness [H-1 ~> m-1 or m2 kg-1]
-  !real :: scale_factor_fw !< Scale factor to convert fw mass flux (kg m-2 s-1) to volume flux (m3 s-1)
-  !real :: scale_factor_sw !< Scale factor to convert sw exchange mass flux (kg m-2 s-1) to volume flux (m3 s-1)
   integer, parameter :: nz_ebm = 3  !< Number of layers in the EBM grid + 1  [nondim]
                                     !! The extra layer is needed to avoid propagating the lower layer value.
   integer :: nz      !< Number of layers in the native grid  [nondim]
@@ -371,7 +367,6 @@ subroutine calculate_EBM(CS, G, i, j, Idt, lrunoff, EnthalpyConst, netMassIn, T2
 
   ! Number of layers in the native grid
   nz = size(T2d_col)
-  ! ke = 4 ! for testing
 
   ! Initialize work arrays
   CS%wf_U_work(:) = 0.0
@@ -419,7 +414,6 @@ subroutine calculate_EBM(CS, G, i, j, Idt, lrunoff, EnthalpyConst, netMassIn, T2
 
   ! Distribute river runoff over upper layer
   do k = 1, nz
-    !dThickness = lrunoff * 0.25  ! Each of the 4 layers receives 1/4 of the runoff
     dThickness = lrunoff * CS%wf_U_work(k)
     sum_dThickness = sum_dThickness + dThickness
     dTemp = 0.
@@ -434,8 +428,6 @@ subroutine calculate_EBM(CS, G, i, j, Idt, lrunoff, EnthalpyConst, netMassIn, T2
     ! heat_content_lrunoff from the coupler elsewhere.
 
     dTemp = dTemp + dThickness * Temp_in * EnthalpyConst
-    ! GMM, this is not used. Delete?
-    Salin_in = 0.0
 
     hOld = h2d_col(k)
     h2d_col(k) = h2d_col(k) + dThickness
