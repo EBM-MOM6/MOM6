@@ -61,6 +61,8 @@ type, public :: EBM_cs ; private
   real, allocatable, dimension(:,:) :: ebm_Q_u     !< EBM upper layer volume flux [m3 s-1]
   real, allocatable, dimension(:,:) :: ebm_Q_l     !< EBM lower layer volume flux [m3 s-1]
   real, allocatable, dimension(:,:) :: ebm_S_u     !< EBM upper layer outflow salinity [S ~> ppt]
+  real, allocatable, dimension(:) :: wf_U_work    !< Work array for remapped upper weighting function [nondim]
+  real, allocatable, dimension(:) :: wf_L_work    !< Work array for remapped lower weighting function [nondim]
 
 end type EBM_cs
 
@@ -178,6 +180,8 @@ logical function EBM_init(Time, param_file, G, GV, diag, CS)
   allocate(CS%H_L(SZI_(G),SZJ_(G)))
   allocate(CS%wf_U(SZI_(G),SZJ_(G),3))
   allocate(CS%wf_L(SZI_(G),SZJ_(G),3))
+  allocate(CS%wf_U_work(GV%ke), source=0.0)
+  allocate(CS%wf_L_work(GV%ke), source=0.0)
   CS%H_est(:,:) = CS%H
   CS%H_U(:,:) = 0.0
   CS%H_L(:,:) = 0.0
@@ -348,8 +352,6 @@ subroutine calculate_EBM(CS, G, i, j, Idt, lrunoff, EnthalpyConst, netMassIn, T2
   real, dimension(nz_ebm) :: ebm_wf_L  !< EBM weighting function lower layer (pointwise) [m-1]
   real, dimension(nz_ebm) :: ebm_S     !<  Salinity in the column on the EBM grid [S ~> ppt]
   real, dimension(nz_ebm) :: ebm_T     !<  Temperature in the column on the EBM grid [C ~> degC]
-  real, allocatable :: wf_U(:)         !< Weighting function upper layer native grid (pointwise) [m-1]
-  real, allocatable :: wf_L(:)         !< Weighting function lower layer native grid (pointwise) [m-1]
   real :: integral_U  !< Sum of wf_U over the column, used for normalization [nondim]
   real :: integral_L  !< Sum of wf_L over the column, used for normalization [nondim]
 
@@ -371,37 +373,37 @@ subroutine calculate_EBM(CS, G, i, j, Idt, lrunoff, EnthalpyConst, netMassIn, T2
   nz = size(T2d_col)
   ! ke = 4 ! for testing
 
-  ! allocate arrays
-  allocate(wf_U(nz), source=0.0)
-  allocate(wf_L(nz), source=0.0)
+  ! Initialize work arrays
+  CS%wf_U_work(:) = 0.0
+  CS%wf_L_work(:) = 0.0
 
   ! 1) Distribute river runoff over upper layer
 
   ! 1a) remap weighting functions
-  call remapping_core_h(CS%remap_cs, nz_ebm, dz_ebm(:), ebm_wf_U(:), nz, h2d_col(:), wf_U(:))
-  call remapping_core_h(CS%remap_cs, nz_ebm, dz_ebm(:), ebm_wf_L(:), nz, h2d_col(:), wf_L(:))
+  call remapping_core_h(CS%remap_cs, nz_ebm, dz_ebm(:), ebm_wf_U(:), nz, h2d_col(:), CS%wf_U_work(:))
+  call remapping_core_h(CS%remap_cs, nz_ebm, dz_ebm(:), ebm_wf_L(:), nz, h2d_col(:), CS%wf_L_work(:))
 
   ! Multiply weights by layer thickness to make them nondim
   do k = 1, nz
-    wf_U(k) = wf_U(k) * h2d_col(k)
-    wf_L(k) = wf_L(k) * h2d_col(k)
+    CS%wf_U_work(k) = CS%wf_U_work(k) * h2d_col(k)
+    CS%wf_L_work(k) = CS%wf_L_work(k) * h2d_col(k)
   enddo
 
   ! check that the SUM(wf_U) is 1.
-  call check_wf_integral(G, i, j, nz_ebm, dz_ebm, ebm_wf_U, nz, h2d_col, wf_U, 'wf_U')
-  call check_wf_integral(G, i, j, nz_ebm, dz_ebm, ebm_wf_L, nz, h2d_col, wf_L, 'wf_L')
+  call check_wf_integral(G, i, j, nz_ebm, dz_ebm, ebm_wf_U, nz, h2d_col, CS%wf_U_work, 'wf_U')
+  call check_wf_integral(G, i, j, nz_ebm, dz_ebm, ebm_wf_L, nz, h2d_col, CS%wf_L_work, 'wf_L')
 
   ! Normalize weighting functions to sum exactly to 1 to prevent
   ! floating-point drift from accumulating into conservation errors.
   integral_U = 0.0
   integral_L = 0.0
   do k = 1, nz
-    integral_U = integral_U + wf_U(k)
-    integral_L = integral_L + wf_L(k)
+    integral_U = integral_U + CS%wf_U_work(k)
+    integral_L = integral_L + CS%wf_L_work(k)
   enddo
   do k = 1, nz
-    wf_U(k) = wf_U(k) / integral_U
-    wf_L(k) = wf_L(k) / integral_L
+    CS%wf_U_work(k) = CS%wf_U_work(k) / integral_U
+    CS%wf_L_work(k) = CS%wf_L_work(k) / integral_L
   enddo
 
   ! Compute salinity on EBM grid [S ~> ppt]
@@ -418,7 +420,7 @@ subroutine calculate_EBM(CS, G, i, j, Idt, lrunoff, EnthalpyConst, netMassIn, T2
   ! Distribute river runoff over upper layer
   do k = 1, nz
     !dThickness = lrunoff * 0.25  ! Each of the 4 layers receives 1/4 of the runoff
-    dThickness = lrunoff * wf_U(k)
+    dThickness = lrunoff * CS%wf_U_work(k)
     sum_dThickness = sum_dThickness + dThickness
     dTemp = 0.
     dSalt = 0.
@@ -455,7 +457,7 @@ subroutine calculate_EBM(CS, G, i, j, Idt, lrunoff, EnthalpyConst, netMassIn, T2
       write(stdout,'(A,ES15.8)') "  sum_dThickness           : ", sum_dThickness
       write(stdout,'(A,ES15.8)') "  lrunoff           : ", lrunoff
       do k = 1, nz
-        write(stdout,'(A,I4,A,2ES15.8)') "    k=", k, " : ", wf_U(k), wf_L(k)
+        write(stdout,'(A,I4,A,2ES15.8)') "    k=", k, " : ", CS%wf_U_work(k), CS%wf_L_work(k)
       enddo
       call MOM_error(FATAL, "MOM_EBM calculate_EBM: river input distribution is not conservative.")
     endif
@@ -488,7 +490,7 @@ subroutine calculate_EBM(CS, G, i, j, Idt, lrunoff, EnthalpyConst, netMassIn, T2
 
     ! 2a) Upper and Lower layer combined
     do k = 1, nz
-      dThickness = Q_l * (wf_L(k) - wf_U(k))
+      dThickness = Q_l * (CS%wf_L_work(k) - CS%wf_U_work(k))
       dTemp = dThickness * ebm_T(2)
       dSalt = dThickness * ebm_S(2)
       sum_dThickness = sum_dThickness + dThickness
@@ -515,7 +517,7 @@ subroutine calculate_EBM(CS, G, i, j, Idt, lrunoff, EnthalpyConst, netMassIn, T2
         write(stdout,'(A,ES15.8)') "  sum_dSalt      : ", sum_dSalt
         write(stdout,'(A,ES15.8)') "  Q_l            : ", Q_l
         do k = 1, nz
-          write(stdout,'(A,I4,A,2ES15.8)') "    k=", k, " : ", wf_U(k), wf_L(k)
+          write(stdout,'(A,I4,A,2ES15.8)') "    k=", k, " : ", CS%wf_U_work(k), CS%wf_L_work(k)
         enddo
         call MOM_error(FATAL, "MOM_EBM calculate_EBM: exchange flow is not conservative.")
       endif
@@ -688,9 +690,9 @@ subroutine estuary_box_model(CS, G, ig, jg, Q_r, S_l, Q_u, Q_l, S_u)
   rho_l = CS%rho_ref * (1.0 + CS%beta_S * S_l)
 
   ! River and tidal velocities
-  u_t    = -CS%tide_amp * sqrt(CS%g / CS%H)        ! Tidal velocity (toward river)
-  u_r    = Q_r / (CS%W_h * CS%H * (1.0 - CS%h0))  ! Riverine velocity at head of upper layer
-  c_wave = sqrt(CS%beta_S * S_l * CS%g * CS%H)     ! Densimetric wave phase speed
+  u_t    = -CS%tide_amp * sqrt(CS%g / CS%H_est(ig,jg))        ! Tidal velocity (toward river)
+  u_r    = Q_r / (CS%W_h * CS%H_est(ig,jg) * (1.0 - CS%h0))  ! Riverine velocity at head of upper layer
+  c_wave = sqrt(CS%beta_S * S_l * CS%g * CS%H_est(ig,jg))     ! Densimetric wave phase speed
 
   ! Dimensionless parameters
   ur0 = u_r / c_wave
@@ -731,7 +733,7 @@ subroutine estuary_box_model(CS, G, ig, jg, Q_r, S_l, Q_u, Q_l, S_u)
       write(stdout,'(A,ES15.8)') "  S_l        : ", S_l
       write(stdout,'(A,ES15.8)') "  tide_amp   : ", CS%tide_amp
       write(stdout,'(A,ES15.8)') "  W_h        : ", CS%W_h
-      write(stdout,'(A,ES15.8)') "  H          : ", CS%H
+      write(stdout,'(A,ES15.8)') "  H_est      : ", CS%H_est(ig,jg)
       write(stdout,'(A,ES15.8)') "  a1         : ", CS%a1
       write(stdout,'(A,ES15.8)') "  a2         : ", CS%a2
       write(stdout,'(A,ES15.8)') "  h0         : ", CS%h0
@@ -759,7 +761,7 @@ subroutine estuary_box_model(CS, G, ig, jg, Q_r, S_l, Q_u, Q_l, S_u)
       write(stdout,'(A,ES15.8)') "  S_l        : ", S_l
       write(stdout,'(A,ES15.8)') "  tide_amp   : ", CS%tide_amp
       write(stdout,'(A,ES15.8)') "  W_h        : ", CS%W_h
-      write(stdout,'(A,ES15.8)') "  H          : ", CS%H
+      write(stdout,'(A,ES15.8)') "  H_est      : ", CS%H_est(ig,jg)
       write(stdout,'(A,ES15.8)') "  a1         : ", CS%a1
       write(stdout,'(A,ES15.8)') "  a2         : ", CS%a2
       write(stdout,'(A,ES15.8)') "  h0         : ", CS%h0
@@ -780,30 +782,30 @@ subroutine estuary_box_model(CS, G, ig, jg, Q_r, S_l, Q_u, Q_l, S_u)
   ! Upper layer salinity and volume fluxes at EBM mouth
   uu0 = R0 / (1.0 - CS%h0) - CS%h0 / (1.0 - CS%h0) * ul0
   S_u = (-S_l * ul0 * CS%h0 - S_l * CS%a2 * T0) / (R0 - ul0 * CS%h0 - CS%a2 * T0)
-  Q_l = ul0 * CS%h0 * CS%H * CS%W_h * c_wave
-  Q_u = uu0 * (1.0 - CS%h0) * CS%H * CS%W_h * c_wave
+  Q_l = ul0 * CS%h0 * CS%H_est(ig,jg) * CS%W_h * c_wave
+  Q_u = uu0 * (1.0 - CS%h0) * CS%H_est(ig,jg) * CS%W_h * c_wave
 
   ! Verify closure of EBM potential energy budget
   u_l   = ul0 * c_wave
   u_u   = uu0 * c_wave
-  u_bar = Q_r / (CS%W_h * CS%H)
-  h_l   = CS%H * CS%h0
+  u_bar = Q_r / (CS%W_h * CS%H_est(ig,jg))
+  h_l   = CS%H_est(ig,jg) * CS%h0
   rho_u = CS%rho_ref * (1.0 + CS%beta_S * S_u)
 
   AD = 0.5 * CS%g * rho_l * u_l * h_l**2.0 &
-     + 0.5 * CS%g * (rho_u * u_u - rho_r * u_r) * (CS%H**2.0 - h_l**2.0)
+     + 0.5 * CS%g * (rho_u * u_u - rho_r * u_r) * (CS%H_est(ig,jg)**2.0 - h_l**2.0)
 
-  HD = -0.5 * CS%a2 * CS%g * (rho_l - rho_u) * (CS%H**2.0 - h_l**2.0) * u_t / PI
+  HD = -0.5 * CS%a2 * CS%g * (rho_l - rho_u) * (CS%H_est(ig,jg)**2.0 - h_l**2.0) * u_t / PI
 
   VD = -0.5 * CS%g * (rho_u - rho_l) &
      * (rho_l + rho_u - 2.0 * rho_r) / (rho_l - rho_r) &
-     * 0.024 * CS%a1 * CS%H**2.0 &
+     * 0.024 * CS%a1 * CS%H_est(ig,jg)**2.0 &
      * (c_wave**4.0 / (u_bar * CS%Sc**2.0))**(1.0/3.0)
 
   LF = -0.25 * CS%g * Q_l / CS%W_h &
      * ( (rho_u**2.0 + 2.0 * rho_l * rho_r - 2.0 * rho_u * rho_r) &
-         * (CS%H - h_l) &
-       - rho_r**2.0 * CS%H + rho_l**2.0 * h_l) / (rho_l - rho_r)
+         * (CS%H_est(ig,jg) - h_l) &
+       - rho_r**2.0 * CS%H_est(ig,jg) + rho_l**2.0 * h_l) / (rho_l - rho_r)
 
   ! GMM
   ! TODO: make this a 2D field and add option to save as a diagnostic?
