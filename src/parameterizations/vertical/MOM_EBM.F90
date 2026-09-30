@@ -14,7 +14,7 @@ use MOM_diag_mediator,         only : register_diag_field, time_type
 use MOM_error_handler,         only : MOM_error, WARNING, FATAL, is_root_pe
 use MOM_file_parser,           only : get_param, log_version, param_file_type
 use MOM_grid,                  only : ocean_grid_type
-use MOM_io,                    only : file_exists, field_size, open_file_to_read
+use MOM_io,                    only : file_exists, field_exists, field_size, open_file_to_read
 use MOM_io,                    only : close_file_to_read, read_variable, stdout, slasher
 use MOM_remapping,             only : remapping_CS, initialize_remapping
 use MOM_remapping,             only : extract_member_remapping_CS, remapping_core_h
@@ -31,11 +31,11 @@ public EBM_init, calculate_EBM, EBM_is_used, post_EBM_diagnostics
 type, public :: EBM_cs ; private
 
   real :: tide_amp !< Averaged tidal amplitude at estuary mouth [m]
-  real :: W_h      !< Estuary head width [m]
+  real, allocatable, dimension(:,:) :: W_h !< Estuary head width [m]
   real :: H        !< Estuary averaged depth [m]
-  real :: a2       !< A constant of tidal diffusion [nondim]
-  real :: a1       !< A constant of estuarine mixing length [nondim]
-  real :: h0       !< A constant of ratio of geometry: h_l/H [nondim]
+  real, allocatable, dimension(:,:) :: a2  !< A constant of tidal diffusion [nondim]
+  real, allocatable, dimension(:,:) :: a1  !< A constant of estuarine mixing length [nondim]
+  real, allocatable, dimension(:,:) :: h0  !< A constant of ratio of geometry: h_l/H [nondim]
   real :: g        !< Gravitational acceleration [m s-2]
   real :: rho_ref    !< Reference density for linear equation of state [kg m-3]
   real :: beta_S   !< Saline contraction coefficient [ppt-1]
@@ -87,7 +87,15 @@ logical function EBM_init(Time, param_file, G, GV, diag, CS)
   character(len=200) :: inputdir            ! Path to the input directory
   logical            :: boundary_extrap     ! Controls if boundary extrapolation is used
   logical            :: om4_remap_via_sub_cells ! Use the OM4-era remap_via_sub_cells
+  real :: W_h_dflt                           ! Default estuary head width [m]
+  real :: a1_dflt                            ! Default mixing length constant [nondim]
+  real :: a2_dflt                            ! Default tidal diffusion constant [nondim]
+  real :: h0_dflt                            ! Default geometry ratio h_l/H [nondim]
   real, dimension(:), allocatable :: new_depth ! The new values of estuary depth [m]
+  real, dimension(:), allocatable :: new_W_h   ! Override values for W_h [m]
+  real, dimension(:), allocatable :: new_a1    ! Override values for a1 [nondim]
+  real, dimension(:), allocatable :: new_a2    ! Override values for a2 [nondim]
+  real, dimension(:), allocatable :: new_h0    ! Override values for h0 [nondim]
   integer, dimension(:), allocatable :: ig, jg ! The global indices of points to modify
   integer :: id                              ! Diagnostic id for static fields
   integer :: i, j, n, ncid, n_edits, i_file, j_file, ndims, sizes(8)
@@ -111,7 +119,7 @@ logical function EBM_init(Time, param_file, G, GV, diag, CS)
                  "Averaged tidal amplitude at the estuary mouth.", &
                  units="m", default=1.0)
 
-  call get_param(param_file, mdl, "EBM_HEAD_WIDTH", CS%W_h, &
+  call get_param(param_file, mdl, "EBM_HEAD_WIDTH", W_h_dflt, &
                  "Estuary head width.", &
                  units="m", default=2000.0)
 
@@ -119,15 +127,15 @@ logical function EBM_init(Time, param_file, G, GV, diag, CS)
                  "Estuary averaged depth.", &
                  units="m", default=10.0)
 
-  call get_param(param_file, mdl, "EBM_A1", CS%a1, &
+  call get_param(param_file, mdl, "EBM_A1", a1_dflt, &
                  "A constant of estuarine mixing length.", &
                  units="nondim", default=0.876)
 
-  call get_param(param_file, mdl, "EBM_A2", CS%a2, &
+  call get_param(param_file, mdl, "EBM_A2", a2_dflt, &
                  "A constant of tidal diffusion.", &
                  units="nondim", default=0.0)
 
-  call get_param(param_file, mdl, "EBM_H0", CS%h0, &
+  call get_param(param_file, mdl, "EBM_H0", h0_dflt, &
                  "A constant of ratio of geometry: h_l/H.", &
                  units="nondim", default=0.5)
 
@@ -180,24 +188,34 @@ logical function EBM_init(Time, param_file, G, GV, diag, CS)
   allocate(CS%H_L(SZI_(G),SZJ_(G)))
   allocate(CS%wf_U(SZI_(G),SZJ_(G),3))
   allocate(CS%wf_L(SZI_(G),SZJ_(G),3))
+  allocate(CS%W_h(SZI_(G),SZJ_(G)))
+  allocate(CS%a1(SZI_(G),SZJ_(G)))
+  allocate(CS%a2(SZI_(G),SZJ_(G)))
+  allocate(CS%h0(SZI_(G),SZJ_(G)))
   allocate(CS%wf_U_work(GV%ke), source=0.0)
   allocate(CS%wf_L_work(GV%ke), source=0.0)
   CS%H_est(:,:) = CS%H
+  CS%W_h(:,:) = W_h_dflt
+  CS%a1(:,:) = a1_dflt
+  CS%a2(:,:) = a2_dflt
+  CS%h0(:,:) = h0_dflt
   CS%H_U(:,:) = 0.0
   CS%H_L(:,:) = 0.0
   CS%wf_U(:,:,:) = 0.0
   CS%wf_L(:,:,:) = 0.0
 
-  ! Apply optional point-by-point overrides of H_est from a file
+  ! Apply optional point-by-point overrides of EBM parameters from a file
   call get_param(param_file, mdl, "INPUTDIR", inputdir, default=".")
   inputdir = slasher(inputdir)
-  call get_param(param_file, mdl, "EBM_DEPTH_EDITS_FILE", ebm_edits_file, &
-                 "The file from which to read a list of i,j,depth overrides for the "//&
-                 "estuary averaged depth (H_est). The file must be in NetCDF format "//&
-                 "with scalar variables 'ni' and 'nj' matching the global grid "//&
-                 "dimensions, and 1-D arrays 'iEdit', 'jEdit', and 'zEdit' (all of "//&
-                 "size nEdits) giving the global i-index, global j-index (both using "//&
-                 "Python 0-based indexing), and new estuary depth [m] for each edit.", &
+  call get_param(param_file, mdl, "EBM_EDITS_FILE", ebm_edits_file, &
+                 "The file from which to read per-column EBM parameter overrides. "//&
+                 "The file must be in NetCDF format with scalar variables 'ni' and "//&
+                 "'nj' matching the global grid dimensions, and 1-D arrays 'iEdit' "//&
+                 "and 'jEdit' (of size nEdits) giving the global i-index and j-index "//&
+                 "(both using Python 0-based indexing). Optional 1-D arrays of size "//&
+                 "nEdits: 'zEdit' (estuary depth [m]), 'W_hEdit' (head width [m]), "//&
+                 "'a1Edit' (mixing length constant), 'a2Edit' (tidal diffusion "//&
+                 "constant), 'h0Edit' (geometry ratio h_l/H).", &
                  default="")
 
   if (len_trim(ebm_edits_file) > 0) then
@@ -218,30 +236,78 @@ logical function EBM_init(Time, param_file, G, GV, diag, CS)
     if (j_file /= G%jeg) call MOM_error(FATAL, trim(mdl)//': Incompatible j-dimension of grid in '//&
                                         trim(ebm_edits_file))
 
-    ! Get nEdits
-    call field_size(ebm_edits_file, 'zEdit', sizes, ndims=ndims, ncid_in=ncid)
-    if (ndims /= 1) call MOM_error(FATAL, "The variable zEdit has an "//&
+    ! Get nEdits from iEdit
+    call field_size(ebm_edits_file, 'iEdit', sizes, ndims=ndims, ncid_in=ncid)
+    if (ndims /= 1) call MOM_error(FATAL, "The variable iEdit has an "//&
               "unexpected number of dimensions in "//trim(ebm_edits_file))
     n_edits = sizes(1)
-    allocate(ig(n_edits), jg(n_edits), new_depth(n_edits))
+    allocate(ig(n_edits), jg(n_edits))
 
-    ! Read iEdit, jEdit and zEdit
+    ! Read iEdit and jEdit (required)
     call read_variable(ebm_edits_file, 'iEdit', ig, ncid_in=ncid)
     call read_variable(ebm_edits_file, 'jEdit', jg, ncid_in=ncid)
-    call read_variable(ebm_edits_file, 'zEdit', new_depth, ncid_in=ncid)
+
+    ! Read optional override arrays
+    if (field_exists(ebm_edits_file, 'zEdit')) then
+      allocate(new_depth(n_edits))
+      call read_variable(ebm_edits_file, 'zEdit', new_depth, ncid_in=ncid)
+    endif
+    if (field_exists(ebm_edits_file, 'W_hEdit')) then
+      allocate(new_W_h(n_edits))
+      call read_variable(ebm_edits_file, 'W_hEdit', new_W_h, ncid_in=ncid)
+    endif
+    if (field_exists(ebm_edits_file, 'a1Edit')) then
+      allocate(new_a1(n_edits))
+      call read_variable(ebm_edits_file, 'a1Edit', new_a1, ncid_in=ncid)
+    endif
+    if (field_exists(ebm_edits_file, 'a2Edit')) then
+      allocate(new_a2(n_edits))
+      call read_variable(ebm_edits_file, 'a2Edit', new_a2, ncid_in=ncid)
+    endif
+    if (field_exists(ebm_edits_file, 'h0Edit')) then
+      allocate(new_h0(n_edits))
+      call read_variable(ebm_edits_file, 'h0Edit', new_h0, ncid_in=ncid)
+    endif
     call close_file_to_read(ncid, ebm_edits_file)
 
     do n = 1, n_edits
       i = ig(n) - G%idg_offset + 1 ! +1 for python indexing
       j = jg(n) - G%jdg_offset + 1
       if (i>=G%isc .and. i<=G%iec .and. j>=G%jsc .and. j<=G%jec) then
-        write(stdout,'(a,3i5,f8.2,a,f8.2,2i4)') &
-          'EBM depth edit: ', n, ig(n), jg(n), CS%H_est(i,j), '->', abs(new_depth(n)), i, j
-        CS%H_est(i,j) = abs(new_depth(n))
+        if (allocated(new_depth)) then
+          write(stdout,'(a,3i5,f8.2,a,f8.2,2i4)') &
+            'EBM depth edit: ', n, ig(n), jg(n), CS%H_est(i,j), '->', abs(new_depth(n)), i, j
+          CS%H_est(i,j) = abs(new_depth(n))
+        endif
+        if (allocated(new_W_h)) then
+          write(stdout,'(a,3i5,ES12.4,a,ES12.4)') &
+            'EBM W_h edit: ', n, ig(n), jg(n), CS%W_h(i,j), '->', new_W_h(n)
+          CS%W_h(i,j) = new_W_h(n)
+        endif
+        if (allocated(new_a1)) then
+          write(stdout,'(a,3i5,ES12.4,a,ES12.4)') &
+            'EBM a1 edit: ', n, ig(n), jg(n), CS%a1(i,j), '->', new_a1(n)
+          CS%a1(i,j) = new_a1(n)
+        endif
+        if (allocated(new_a2)) then
+          write(stdout,'(a,3i5,ES12.4,a,ES12.4)') &
+            'EBM a2 edit: ', n, ig(n), jg(n), CS%a2(i,j), '->', new_a2(n)
+          CS%a2(i,j) = new_a2(n)
+        endif
+        if (allocated(new_h0)) then
+          write(stdout,'(a,3i5,ES12.4,a,ES12.4)') &
+            'EBM h0 edit: ', n, ig(n), jg(n), CS%h0(i,j), '->', new_h0(n)
+          CS%h0(i,j) = new_h0(n)
+        endif
       endif
     enddo
 
-    deallocate(ig, jg, new_depth)
+    deallocate(ig, jg)
+    if (allocated(new_depth)) deallocate(new_depth)
+    if (allocated(new_W_h)) deallocate(new_W_h)
+    if (allocated(new_a1)) deallocate(new_a1)
+    if (allocated(new_a2)) deallocate(new_a2)
+    if (allocated(new_h0)) deallocate(new_h0)
   endif
 
   ! TODO: revisit H_U and H_L later with limiters?
@@ -683,25 +749,26 @@ subroutine estuary_box_model(CS, G, ig, jg, Q_r, S_l, Q_u, Q_l, S_u)
 
   ! River and tidal velocities
   u_t    = -CS%tide_amp * sqrt(CS%g / CS%H_est(ig,jg))        ! Tidal velocity (toward river)
-  u_r    = Q_r / (CS%W_h * CS%H_est(ig,jg) * (1.0 - CS%h0))  ! Riverine velocity at head of upper layer
+  u_r    = Q_r / (CS%W_h(ig,jg) * CS%H_est(ig,jg) * (1.0 - CS%h0(ig,jg)))  ! Riverine velocity at head of upper layer
   c_wave = sqrt(CS%beta_S * S_l * CS%g * CS%H_est(ig,jg))     ! Densimetric wave phase speed
 
   ! Dimensionless parameters
   ur0 = u_r / c_wave
   ut0 = u_t / c_wave
-  R0  = ur0 * (1.0 - CS%h0)
-  T0  = ut0 * (1.0 - CS%h0) / PI
+  R0  = ur0 * (1.0 - CS%h0(ig,jg))
+  T0  = ut0 * (1.0 - CS%h0(ig,jg)) / PI
 
   ! Coefficients of the cubic equation for dimensionless lower layer inflow (ul0)
-  a = -CS%h0**3.0
+  a = -CS%h0(ig,jg)**3.0
 
-  b = 2.0 * CS%h0**2.0 * ((2.0 - CS%h0) * R0 - CS%a2 * T0)
+  b = 2.0 * CS%h0(ig,jg)**2.0 * ((2.0 - CS%h0(ig,jg)) * R0 - CS%a2(ig,jg) * T0)
 
-  c = 0.096 * CS%a1 * CS%h0 * (CS%Sc**2.0 * R0)**(-1.0/3.0) * R0 &
-    - CS%h0 * ((2.0 - CS%h0) * R0 * (R0 - 2.0 * CS%a2 * T0) + CS%a2**2.0 * T0**2.0)
+  c = 0.096 * CS%a1(ig,jg) * CS%h0(ig,jg) * (CS%Sc**2.0 * R0)**(-1.0/3.0) * R0 &
+    - CS%h0(ig,jg) * ((2.0 - CS%h0(ig,jg)) * R0 * (R0 - 2.0 * CS%a2(ig,jg) * T0) &
+    + CS%a2(ig,jg)**2.0 * T0**2.0)
 
-  d = -0.048 * CS%a1 * (CS%Sc**2.0 * R0)**(-1.0/3.0) &
-    * R0 * (R0 - 2.0 * CS%a2 * T0)
+  d = -0.048 * CS%a1(ig,jg) * (CS%Sc**2.0 * R0)**(-1.0/3.0) &
+    * R0 * (R0 - 2.0 * CS%a2(ig,jg) * T0)
 
   call cubsolve(b/a, c/a, d/a, roots)
 
@@ -724,11 +791,11 @@ subroutine estuary_box_model(CS, G, ig, jg, Q_r, S_l, Q_u, Q_l, S_u)
       write(stdout,'(A,ES15.8)') "  Q_r        : ", Q_r
       write(stdout,'(A,ES15.8)') "  S_l        : ", S_l
       write(stdout,'(A,ES15.8)') "  tide_amp   : ", CS%tide_amp
-      write(stdout,'(A,ES15.8)') "  W_h        : ", CS%W_h
+      write(stdout,'(A,ES15.8)') "  W_h        : ", CS%W_h(ig,jg)
       write(stdout,'(A,ES15.8)') "  H_est      : ", CS%H_est(ig,jg)
-      write(stdout,'(A,ES15.8)') "  a1         : ", CS%a1
-      write(stdout,'(A,ES15.8)') "  a2         : ", CS%a2
-      write(stdout,'(A,ES15.8)') "  h0         : ", CS%h0
+      write(stdout,'(A,ES15.8)') "  a1         : ", CS%a1(ig,jg)
+      write(stdout,'(A,ES15.8)') "  a2         : ", CS%a2(ig,jg)
+      write(stdout,'(A,ES15.8)') "  h0         : ", CS%h0(ig,jg)
       write(stdout,'(A,ES15.8)') "  g          : ", CS%g
       write(stdout,'(A,ES15.8)') "  rho_ref    : ", CS%rho_ref
       write(stdout,'(A,ES15.8)') "  beta_S     : ", CS%beta_S
@@ -752,11 +819,11 @@ subroutine estuary_box_model(CS, G, ig, jg, Q_r, S_l, Q_u, Q_l, S_u)
       write(stdout,'(A,ES15.8)') "  Q_r        : ", Q_r
       write(stdout,'(A,ES15.8)') "  S_l        : ", S_l
       write(stdout,'(A,ES15.8)') "  tide_amp   : ", CS%tide_amp
-      write(stdout,'(A,ES15.8)') "  W_h        : ", CS%W_h
+      write(stdout,'(A,ES15.8)') "  W_h        : ", CS%W_h(ig,jg)
       write(stdout,'(A,ES15.8)') "  H_est      : ", CS%H_est(ig,jg)
-      write(stdout,'(A,ES15.8)') "  a1         : ", CS%a1
-      write(stdout,'(A,ES15.8)') "  a2         : ", CS%a2
-      write(stdout,'(A,ES15.8)') "  h0         : ", CS%h0
+      write(stdout,'(A,ES15.8)') "  a1         : ", CS%a1(ig,jg)
+      write(stdout,'(A,ES15.8)') "  a2         : ", CS%a2(ig,jg)
+      write(stdout,'(A,ES15.8)') "  h0         : ", CS%h0(ig,jg)
       write(stdout,'(A,ES15.8)') "  g          : ", CS%g
       write(stdout,'(A,ES15.8)') "  rho_ref    : ", CS%rho_ref
       write(stdout,'(A,ES15.8)') "  beta_S     : ", CS%beta_S
@@ -772,29 +839,30 @@ subroutine estuary_box_model(CS, G, ig, jg, Q_r, S_l, Q_u, Q_l, S_u)
   end if
 
   ! Upper layer salinity and volume fluxes at EBM mouth
-  uu0 = R0 / (1.0 - CS%h0) - CS%h0 / (1.0 - CS%h0) * ul0
-  S_u = (-S_l * ul0 * CS%h0 - S_l * CS%a2 * T0) / (R0 - ul0 * CS%h0 - CS%a2 * T0)
-  Q_l = ul0 * CS%h0 * CS%H_est(ig,jg) * CS%W_h * c_wave
-  Q_u = uu0 * (1.0 - CS%h0) * CS%H_est(ig,jg) * CS%W_h * c_wave
+  uu0 = R0 / (1.0 - CS%h0(ig,jg)) - CS%h0(ig,jg) / (1.0 - CS%h0(ig,jg)) * ul0
+  S_u = (-S_l * ul0 * CS%h0(ig,jg) - S_l * CS%a2(ig,jg) * T0) / &
+        (R0 - ul0 * CS%h0(ig,jg) - CS%a2(ig,jg) * T0)
+  Q_l = ul0 * CS%h0(ig,jg) * CS%H_est(ig,jg) * CS%W_h(ig,jg) * c_wave
+  Q_u = uu0 * (1.0 - CS%h0(ig,jg)) * CS%H_est(ig,jg) * CS%W_h(ig,jg) * c_wave
 
   ! Verify closure of EBM potential energy budget
   u_l   = ul0 * c_wave
   u_u   = uu0 * c_wave
-  u_bar = Q_r / (CS%W_h * CS%H_est(ig,jg))
-  h_l   = CS%H_est(ig,jg) * CS%h0
+  u_bar = Q_r / (CS%W_h(ig,jg) * CS%H_est(ig,jg))
+  h_l   = CS%H_est(ig,jg) * CS%h0(ig,jg)
   rho_u = CS%rho_ref * (1.0 + CS%beta_S * S_u)
 
   AD = 0.5 * CS%g * rho_l * u_l * h_l**2.0 &
      + 0.5 * CS%g * (rho_u * u_u - rho_r * u_r) * (CS%H_est(ig,jg)**2.0 - h_l**2.0)
 
-  HD = -0.5 * CS%a2 * CS%g * (rho_l - rho_u) * (CS%H_est(ig,jg)**2.0 - h_l**2.0) * u_t / PI
+  HD = -0.5 * CS%a2(ig,jg) * CS%g * (rho_l - rho_u) * (CS%H_est(ig,jg)**2.0 - h_l**2.0) * u_t / PI
 
   VD = -0.5 * CS%g * (rho_u - rho_l) &
      * (rho_l + rho_u - 2.0 * rho_r) / (rho_l - rho_r) &
-     * 0.024 * CS%a1 * CS%H_est(ig,jg)**2.0 &
+     * 0.024 * CS%a1(ig,jg) * CS%H_est(ig,jg)**2.0 &
      * (c_wave**4.0 / (u_bar * CS%Sc**2.0))**(1.0/3.0)
 
-  LF = -0.25 * CS%g * Q_l / CS%W_h &
+  LF = -0.25 * CS%g * Q_l / CS%W_h(ig,jg) &
      * ( (rho_u**2.0 + 2.0 * rho_l * rho_r - 2.0 * rho_u * rho_r) &
          * (CS%H_est(ig,jg) - h_l) &
        - rho_r**2.0 * CS%H_est(ig,jg) + rho_l**2.0 * h_l) / (rho_l - rho_r)
