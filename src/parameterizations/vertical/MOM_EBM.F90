@@ -342,6 +342,22 @@ logical function EBM_init(Time, param_file, G, GV, diag, CS)
         'EBM lower layer thickness', 'm')
   if (id > 0) call post_data(id, CS%H_L, diag, .true.)
 
+  id = register_static_field('ocean_model', 'ebm_W_h', diag%axesT1, &
+        'Estuary head width used by the EBM', 'm')
+  if (id > 0) call post_data(id, CS%W_h, diag, .true.)
+
+  id = register_static_field('ocean_model', 'ebm_a1', diag%axesT1, &
+        'Estuarine mixing length constant used by the EBM', 'nondim')
+  if (id > 0) call post_data(id, CS%a1, diag, .true.)
+
+  id = register_static_field('ocean_model', 'ebm_a2', diag%axesT1, &
+        'Tidal diffusion constant used by the EBM', 'nondim')
+  if (id > 0) call post_data(id, CS%a2, diag, .true.)
+
+  id = register_static_field('ocean_model', 'ebm_h0', diag%axesT1, &
+        'Geometry ratio h_l/H used by the EBM', 'nondim')
+  if (id > 0) call post_data(id, CS%h0, diag, .true.)
+
   ! Register time-dependent EBM diagnostics
   CS%diag => diag
   CS%id_ebm_S_upper = register_diag_field('ocean_model', 'ebm_S_upper', diag%axesT1, &
