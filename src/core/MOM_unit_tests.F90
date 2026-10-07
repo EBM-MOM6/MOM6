@@ -15,6 +15,7 @@ use MOM_remapping,                  only : remapping_unit_tests
 use MOM_string_functions,           only : string_functions_unit_tests
 use MOM_CFC_cap,                    only : CFC_cap_unit_tests
 use MOM_EOS,                        only : EOS_unit_tests
+use MOM_EBM,                        only : EBM_unit_tests
 
 implicit none ; private
 
@@ -51,6 +52,8 @@ subroutine unit_tests(verbosity)
        "MOM_unit_tests: CFC_cap_unit_tests FAILED")
     if (mixedlayer_restrat_unit_tests(verbose)) call MOM_error(FATAL, &
        "MOM_unit_tests: mixedlayer_restrat_unit_tests FAILED")
+    if (EBM_unit_tests(verbose)) call MOM_error(FATAL, &
+       "MOM_unit_tests: EBM_unit_tests FAILED")
   endif
 
 end subroutine unit_tests

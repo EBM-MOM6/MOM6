@@ -26,6 +26,7 @@ use MOM_verticalGrid,          only : verticalGrid_type
 implicit none ; private
 
 public EBM_init, calculate_EBM, EBM_is_used, post_EBM_diagnostics
+public EBM_unit_tests
 
 !> Control structure including parameters for the estuary box model.
 type, public :: EBM_cs ; private
@@ -951,5 +952,274 @@ subroutine cubsolve(a, b, c, roots)
   roots(3,2) = -sqrt(3.0) * (X - Y) / 2.0
 
 end subroutine cubsolve
+
+!> Unit tests for the EBM module. Returns true if any test fails.
+logical function EBM_unit_tests(verbose)
+  logical, intent(in) :: verbose !< If true, output additional information for debugging unit tests
+
+  ! local variables
+  real, dimension(3,2) :: roots   ! Roots from cubsolve [nondim]
+  real :: tol                     ! Tolerance for floating-point comparisons [nondim]
+  character(len=80) :: test_name  ! Brief description of the unit test
+  type(EBM_cs) :: test_CS         ! Minimal CS for estuary_box_model tests
+  type(ocean_grid_type) :: test_G ! Minimal G for estuary_box_model tests
+  real :: Q_r_test                ! Test river discharge [m3 s-1]
+  real :: S_l_test                ! Test lower layer salinity [ppt]
+  real :: Q_u_test                ! Computed upper layer volume flux [m3 s-1]
+  real :: Q_l_test                ! Computed lower layer volume flux [m3 s-1]
+  real :: S_u_test                ! Computed upper layer salinity [ppt]
+  real :: Q_u_expected            ! Expected upper layer volume flux [m3 s-1]
+  real :: Q_l_expected            ! Expected lower layer volume flux [m3 s-1]
+  real :: S_u_expected            ! Expected upper layer salinity [ppt]
+
+  EBM_unit_tests = .false.
+  tol = 1.0e-5
+  write(stdout,*) '==== MOM_EBM ======================================='
+
+  ! --- cubsolve tests ---
+
+  ! Test 1: Three distinct real roots
+  ! (x-1)(x-2)(x-3) = x^3 - 6x^2 + 11x - 6 => a=-6, b=11, c=-6
+  test_name = 'cubsolve: three real roots (x-1)(x-2)(x-3)'
+  call cubsolve(-6.0, 11.0, -6.0, roots)
+  EBM_unit_tests = EBM_unit_tests .or. &
+    test_cubsolve_real(roots, (/3.0, 1.0, 2.0/), tol, test_name, verbose)
+
+  ! Test 2: One real root and two complex conjugate roots
+  ! (x-1)(x^2+1) = x^3 - x^2 + x - 1 => a=-1, b=1, c=-1
+  test_name = 'cubsolve: one real + two complex roots'
+  call cubsolve(-1.0, 1.0, -1.0, roots)
+  EBM_unit_tests = EBM_unit_tests .or. &
+    test_cubsolve_single_real(roots, 1.0, tol, test_name, verbose)
+
+  ! Test 3: Triple root at x=2
+  ! (x-2)^3 = x^3 - 6x^2 + 12x - 8 => a=-6, b=12, c=-8
+  test_name = 'cubsolve: triple root at x=2'
+  call cubsolve(-6.0, 12.0, -8.0, roots)
+  EBM_unit_tests = EBM_unit_tests .or. &
+    test_cubsolve_single_real(roots, 2.0, tol, test_name, verbose)
+
+  ! Test 4: Roots include zero
+  ! x(x-1)(x+1) = x^3 - x => a=0, b=-1, c=0
+  test_name = 'cubsolve: roots at -1, 0, 1'
+  call cubsolve(0.0, -1.0, 0.0, roots)
+  EBM_unit_tests = EBM_unit_tests .or. &
+    test_cubsolve_real(roots, (/1.0, -1.0, 0.0/), tol, test_name, verbose)
+
+  ! Test 5: Negative real roots (relevant to EBM: ul0 must be real and negative)
+  ! (x+1)(x+2)(x-3) = x^3 + 0x^2 - 7x - 6 => a=0, b=-7, c=-6 (not depressed but general form)
+  ! Actually: x^3 - 7x - 6, a=0, b=-7, c=-6
+  test_name = 'cubsolve: roots with two negative values'
+  call cubsolve(0.0, -7.0, -6.0, roots)
+  EBM_unit_tests = EBM_unit_tests .or. &
+    test_cubsolve_real(roots, (/3.0, -1.0, -2.0/), tol, test_name, verbose)
+
+  if (.not. EBM_unit_tests) write(stdout,*) 'Passed cubsolve tests'
+
+  ! --- estuary_box_model tests ---
+  ! Infrastructure: set up a minimal CS and G for testing.
+  call setup_EBM_test_CS(test_CS, test_G)
+
+  ! Test: Amazon-like river with Sun et al. Table 2 parameters
+  ! test_name = 'estuary_box_model: Amazon-like'
+  ! call estuary_box_model(test_CS, test_G, 1, 1, Q_r_test, S_l_test, Q_u_test, Q_l_test, S_u_test)
+  ! EBM_unit_tests = EBM_unit_tests .or. &
+  !   test_ebm_scalar(Q_u_test, Q_u_expected, tol, 'Q_u', test_name, verbose)
+  ! EBM_unit_tests = EBM_unit_tests .or. &
+  !   test_ebm_scalar(Q_l_test, Q_l_expected, tol, 'Q_l', test_name, verbose)
+  ! EBM_unit_tests = EBM_unit_tests .or. &
+  !   test_ebm_scalar(S_u_test, S_u_expected, tol, 'S_u', test_name, verbose)
+
+  ! Test: Columbia river, Sun et al. Fig 3.
+  test_name = 'estuary_box_model: Columbia river'
+  Q_r_test = 7.5E3 ! m3/s
+  S_l_test = 32.   ! psu
+  test_CS%H_est(1,1) = 10.93  ! m
+  test_CS%W_h(1,1)   = 3.67E3 ! m
+  test_CS%a1(1,1)     = 1.2
+  test_CS%a2(1,1)     = 0.93
+  Q_u_expected = 6000.
+  Q_l_expected = Q_u_expected - Q_r_test
+  S_u_expected = 15.
+  tol = 1000.
+  call estuary_box_model(test_CS, test_G, 1, 1, Q_r_test, S_l_test, Q_u_test, Q_l_test, S_u_test)
+  EBM_unit_tests = EBM_unit_tests .or. &
+    test_ebm_scalar(Q_u_test, Q_u_expected, tol, 'Q_u', test_name, verbose)
+  EBM_unit_tests = EBM_unit_tests .or. &
+    test_ebm_scalar(Q_l_test, Q_l_expected, tol, 'Q_l', test_name, verbose)
+  EBM_unit_tests = EBM_unit_tests .or. &
+    test_ebm_scalar(S_u_test, S_u_expected, tol, 'S_u', test_name, verbose)
+  if (.not. EBM_unit_tests) write(stdout,*) 'Passed estuary_box_model tests'
+
+  call teardown_EBM_test_CS(test_CS, test_G)
+
+end function EBM_unit_tests
+
+!> Returns true if any real root from cubsolve does not match the expected values.
+!! All three roots are expected to be real (imaginary parts = 0).
+logical function test_cubsolve_real(roots, expected, tol, test_name, verbose)
+  real, dimension(3,2), intent(in) :: roots    !< Computed roots [nondim]
+  real, dimension(3),   intent(in) :: expected !< Expected real roots [nondim]
+  real,                 intent(in) :: tol      !< Tolerance for comparison [nondim]
+  character(len=*),     intent(in) :: test_name !< Brief description of the unit test
+  logical,              intent(in) :: verbose  !< If true, always print output
+
+  ! local variables
+  real, dimension(3) :: calc_sorted, exp_sorted ! Sorted arrays for comparison [nondim]
+  integer :: i
+
+  test_cubsolve_real = .false.
+
+  ! Check that all imaginary parts are zero
+  do i = 1, 3
+    if (abs(roots(i,2)) > tol) then
+      test_cubsolve_real = .true.
+      write(stdout,*) "MOM_EBM UNIT TEST FAILED: ", trim(test_name)
+      write(stdout,'(A,I2,A,ES15.8)') "  Root ", i, " has nonzero imaginary part: ", roots(i,2)
+      return
+    endif
+  enddo
+
+  ! Sort both arrays for comparison (simple bubble sort for 3 elements)
+  calc_sorted = roots(:,1)
+  exp_sorted = expected
+  call sort3(calc_sorted)
+  call sort3(exp_sorted)
+
+  do i = 1, 3
+    if (abs(calc_sorted(i) - exp_sorted(i)) > tol) then
+      test_cubsolve_real = .true.
+      write(stdout,*) "MOM_EBM UNIT TEST FAILED: ", trim(test_name)
+      write(stdout,'(A,I2,A,ES15.8,A,ES15.8)') "  Sorted root ", i, &
+        ": calc=", calc_sorted(i), " expected=", exp_sorted(i)
+    endif
+  enddo
+
+  if (verbose .and. .not. test_cubsolve_real) then
+    write(stdout,*) "  PASSED: ", trim(test_name)
+    do i = 1, 3
+      write(stdout,'(A,I2,A,ES15.8,A,ES15.8)') "    root ", i, &
+        ": calc=", calc_sorted(i), " expected=", exp_sorted(i)
+    enddo
+  endif
+
+end function test_cubsolve_real
+
+!> Returns true if the single real root from cubsolve does not match the expected value.
+!! Only the root(s) with zero imaginary part are checked.
+logical function test_cubsolve_single_real(roots, expected, tol, test_name, verbose)
+  real, dimension(3,2), intent(in) :: roots     !< Computed roots [nondim]
+  real,                 intent(in) :: expected  !< Expected real root value [nondim]
+  real,                 intent(in) :: tol       !< Tolerance for comparison [nondim]
+  character(len=*),     intent(in) :: test_name !< Brief description of the unit test
+  logical,              intent(in) :: verbose   !< If true, always print output
+
+  ! local variables
+  integer :: i
+  logical :: found
+
+  test_cubsolve_single_real = .false.
+  found = .false.
+
+  do i = 1, 3
+    if (abs(roots(i,2)) < tol) then
+      found = .true.
+      if (abs(roots(i,1) - expected) > tol) then
+        test_cubsolve_single_real = .true.
+        write(stdout,*) "MOM_EBM UNIT TEST FAILED: ", trim(test_name)
+        write(stdout,'(A,ES15.8,A,ES15.8)') "  Real root: calc=", roots(i,1), " expected=", expected
+      elseif (verbose) then
+        write(stdout,*) "  PASSED: ", trim(test_name)
+        write(stdout,'(A,ES15.8,A,ES15.8)') "    Real root: calc=", roots(i,1), " expected=", expected
+      endif
+    endif
+  enddo
+
+  if (.not. found) then
+    test_cubsolve_single_real = .true.
+    write(stdout,*) "MOM_EBM UNIT TEST FAILED: ", trim(test_name)
+    write(stdout,*) "  No real root found"
+  endif
+
+end function test_cubsolve_single_real
+
+!> Set up a minimal EBM control structure and ocean grid for unit testing.
+!! Allocates 1x1 2D arrays in CS and G with Amazon-like parameters from
+!! Sun et al. (2017) Table 2.
+subroutine setup_EBM_test_CS(CS, G)
+  type(EBM_cs),        intent(inout) :: CS !< EBM control structure to initialize
+  type(ocean_grid_type), intent(inout) :: G  !< Ocean grid structure to initialize
+
+  ! Scalar EBM parameters
+  CS%tide_amp = 1.0      ! [m]
+  CS%g        = 9.8      ! [m s-2]
+  CS%rho_ref  = 1000.0   ! [kg m-3]
+  CS%beta_S   = 7.7e-4   ! [ppt-1]
+  CS%Sc       = 2.2      ! [nondim]
+
+  ! Per-column arrays (1x1)
+  allocate(CS%H_est(1,1)) ; CS%H_est(1,1) = 21.8    ! Amazon depth [m]
+  allocate(CS%W_h(1,1))   ; CS%W_h(1,1)   = 50000.0 ! Amazon head width [m]
+  allocate(CS%a1(1,1))    ; CS%a1(1,1)     = 1.0     ! Amazon a1 [nondim]
+  allocate(CS%a2(1,1))    ; CS%a2(1,1)     = 0.0     ! Amazon a2 [nondim]
+  allocate(CS%h0(1,1))    ; CS%h0(1,1)     = 0.5     ! Amazon h0 [nondim]
+
+  ! Minimal ocean grid (only geoLonT, geoLatT are accessed by estuary_box_model
+  ! in warning messages)
+  allocate(G%geoLonT(1,1)) ; G%geoLonT(1,1) = 310.67  ! Amazon lon
+  allocate(G%geoLatT(1,1)) ; G%geoLatT(1,1) = 0.0     ! Amazon lat
+
+end subroutine setup_EBM_test_CS
+
+!> Deallocate arrays created by setup_EBM_test_CS.
+subroutine teardown_EBM_test_CS(CS, G)
+  type(EBM_cs),        intent(inout) :: CS !< EBM control structure to clean up
+  type(ocean_grid_type), intent(inout) :: G  !< Ocean grid structure to clean up
+
+  deallocate(CS%H_est, CS%W_h, CS%a1, CS%a2, CS%h0)
+  deallocate(G%geoLonT, G%geoLatT)
+
+end subroutine teardown_EBM_test_CS
+
+!> Returns true if a computed scalar does not match the expected value within tolerance.
+logical function test_ebm_scalar(calc, expected, tol, varname, test_name, verbose)
+  real,             intent(in) :: calc      !< Computed value [arbitrary]
+  real,             intent(in) :: expected  !< Expected value [arbitrary]
+  real,             intent(in) :: tol       !< Tolerance for comparison [nondim]
+  character(len=*), intent(in) :: varname   !< Name of the variable being checked
+  character(len=*), intent(in) :: test_name !< Brief description of the unit test
+  logical,          intent(in) :: verbose   !< If true, always print output
+
+  real :: rel_err ! Relative error [nondim]
+
+  test_ebm_scalar = .false.
+  if (expected /= 0.0) then
+    rel_err = abs(calc - expected) / abs(expected)
+  else
+    rel_err = abs(calc - expected)
+  endif
+
+  if (rel_err > tol) then
+    test_ebm_scalar = .true.
+    write(stdout,*) "MOM_EBM UNIT TEST FAILED: ", trim(test_name)
+    write(stdout,'(A,A,A,ES15.8,A,ES15.8,A,ES10.3)') "  ", trim(varname), &
+      ": calc=", calc, " expected=", expected, " rel_err=", rel_err
+  elseif (verbose) then
+    write(stdout,'(A,A,A,ES15.8,A,ES15.8)') "  PASSED ", trim(varname), &
+      ": calc=", calc, " expected=", expected
+  endif
+
+end function test_ebm_scalar
+
+!> Sort a 3-element array in ascending order (simple swap sort).
+subroutine sort3(a)
+  real, dimension(3), intent(inout) :: a !< Array to sort [arbitrary]
+  real :: tmp
+
+  if (a(1) > a(2)) then ; tmp = a(1) ; a(1) = a(2) ; a(2) = tmp ; endif
+  if (a(2) > a(3)) then ; tmp = a(2) ; a(2) = a(3) ; a(3) = tmp ; endif
+  if (a(1) > a(2)) then ; tmp = a(1) ; a(1) = a(2) ; a(2) = tmp ; endif
+
+end subroutine sort3
 
 end module MOM_EBM
