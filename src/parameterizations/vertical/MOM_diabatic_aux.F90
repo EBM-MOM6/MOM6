@@ -23,7 +23,7 @@ use MOM_opacity,       only : set_opacity, opacity_CS, extract_optics_slice, ext
 use MOM_opacity,       only : optics_type, optics_nbands, absorbRemainingSW, sumSWoverBands
 use MOM_tracer_flow_control, only : get_chl_from_model, tracer_flow_control_CS
 use MOM_unit_scaling,  only : unit_scale_type
-use MOM_EBM,           only : EBM_init, calculate_EBM, EBM_cs, post_EBM_diagnostics
+use MOM_EBM,           only : EBM_init, calculate_EBM, EBM_cs, reset_EBM_diagnostics, post_EBM_diagnostics
 use MOM_variables,     only : thermo_var_ptrs
 use MOM_verticalGrid,  only : verticalGrid_type
 
@@ -848,6 +848,7 @@ subroutine applyBoundaryFluxesInOut(CS, G, GV, US, dt, fluxes, optics, nsw, h, t
 
   ! diagnostic to see if need to create mass to avoid grounding
   if (CS%id_createdH>0) CS%createdH(:,:) = 0.
+  if (CS%use_EBM) call reset_EBM_diagnostics(CS%EBM_CS)
   numberOfGroundings = 0
 
   !$OMP parallel do default(none) shared(is,ie,js,je,nz,h,tv,nsw,G,GV,US,optics,fluxes,    &

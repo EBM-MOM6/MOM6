@@ -25,7 +25,7 @@ use MOM_verticalGrid,          only : verticalGrid_type
 
 implicit none ; private
 
-public EBM_init, calculate_EBM, EBM_is_used, post_EBM_diagnostics
+public EBM_init, calculate_EBM, EBM_is_used, reset_EBM_diagnostics, post_EBM_diagnostics
 public EBM_unit_tests
 
 !> Control structure including parameters for the estuary box model.
@@ -663,6 +663,20 @@ subroutine check_wf_integral(G, i, j, nz_ebm, dz_ebm, ebm_wf, nz, h, wf, varname
 
 end subroutine check_wf_integral
 
+
+!> Zero EBM diagnostic arrays before the column loop. This must be called
+!! each timestep before the column loop so that cells where the EBM does not
+!! run (lrunoff=0) contribute zero rather than stale values from a previous timestep.
+subroutine reset_EBM_diagnostics(CS)
+  type(EBM_cs), intent(inout) :: CS !< EBM control structure
+
+  if (CS%id_ebm_S_upper > 0) CS%ebm_S_upper(:,:) = 0.0
+  if (CS%id_ebm_S_lower > 0) CS%ebm_S_lower(:,:) = 0.0
+  if (CS%id_ebm_Q_u > 0) CS%ebm_Q_u(:,:) = 0.0
+  if (CS%id_ebm_Q_l > 0) CS%ebm_Q_l(:,:) = 0.0
+  if (CS%id_ebm_S_u > 0) CS%ebm_S_u(:,:) = 0.0
+
+end subroutine reset_EBM_diagnostics
 
 !> Post time-dependent EBM diagnostics. This should be called after the
 !! column loop that calls calculate_EBM has completed.
