@@ -1008,8 +1008,11 @@ subroutine applyBoundaryFluxesInOut(CS, G, GV, US, dt, fluxes, optics, nsw, h, t
         ! Distributes river runoff vertically and apply the estuary box model
         ! parameterization if enabled.
         ! This only works if aggregate_FW_forcing = False.
+        ! fluxes%lrunoff is in [R Z T-1 ~> kg m-2 s-1]; convert to [H ~> m]
+        ! by multiplying by GV%RZ_to_H * dt, matching extractFluxes1d (line 697).
         if (CS%use_EBM .and. (fluxes%lrunoff(i,j) > 0.0)) then
-          call calculate_EBM(CS%EBM_CS, G, i, j, Idt, fluxes%lrunoff(i,j), EnthalpyConst, &
+          call calculate_EBM(CS%EBM_CS, G, i, j, Idt, &
+                             fluxes%lrunoff(i,j) * GV%RZ_to_H * dt, EnthalpyConst, &
                              netMassIn(i), T2d(i,:), tv%S(i,j,:), h2d(i,:))
         endif
         ! A/ Update mass, temp, and salinity due to incoming mass flux.
