@@ -903,7 +903,8 @@ subroutine estuary_box_model(CS, G, ig, jg, Q_r, S_l, Q_u, Q_l, S_u)
   ERR_EBM = AD - HD - VD - LF
 
   ! Effective upper layer salinity for MOM6; Q_l is negative
-  S_u = -Q_l * S_l / Q_u
+  ! GMM, this came from POP and overrides the tidal contribution to the salinity
+  ! S_u = -Q_l * S_l / Q_u
 
 end subroutine estuary_box_model
 
@@ -1044,18 +1045,18 @@ logical function EBM_unit_tests(verbose)
   ! EBM_unit_tests = EBM_unit_tests .or. &
   !   test_ebm_scalar(S_u_test, S_u_expected, tol, 'S_u', test_name, verbose)
 
-  ! Test: Columbia river, Sun et al. Fig 3.
-  test_name = 'estuary_box_model: Columbia river'
+  ! Test: Columbia river without tides, Sun et al. Fig 3.
+  test_name = 'estuary_box_model: Columbia river without tides'
   Q_r_test = 7.5E3 ! m3/s
   S_l_test = 32.   ! psu
   test_CS%H_est(1,1) = 10.93  ! m
   test_CS%W_h(1,1)   = 3.67E3 ! m
-  test_CS%a1(1,1)     = 1.2
-  test_CS%a2(1,1)     = 0.93
-  Q_u_expected = 6000.
-  Q_l_expected = Q_u_expected - Q_r_test
-  S_u_expected = 15.
-  tol = 1000.
+  test_CS%a1(1,1)     = 0.93  ! mixing lenght
+  test_CS%a2(1,1)     = 0.0   ! tidal diffusion
+  Q_u_expected = 9770.6374
+  Q_l_expected = Q_r_test - Q_u_expected
+  S_u_expected = 7.4366
+  tol = 1
   call estuary_box_model(test_CS, test_G, 1, 1, Q_r_test, S_l_test, Q_u_test, Q_l_test, S_u_test)
   EBM_unit_tests = EBM_unit_tests .or. &
     test_ebm_scalar(Q_u_test, Q_u_expected, tol, 'Q_u', test_name, verbose)
@@ -1063,8 +1064,28 @@ logical function EBM_unit_tests(verbose)
     test_ebm_scalar(Q_l_test, Q_l_expected, tol, 'Q_l', test_name, verbose)
   EBM_unit_tests = EBM_unit_tests .or. &
     test_ebm_scalar(S_u_test, S_u_expected, tol, 'S_u', test_name, verbose)
-  if (.not. EBM_unit_tests) write(stdout,*) 'Passed estuary_box_model tests'
+  if (.not. EBM_unit_tests) write(stdout,*) 'Passed' //test_name
 
+  ! Test: Columbia river with tides, Sun et al. Fig 3.
+  test_name = 'estuary_box_model: Columbia river with tides'
+  Q_r_test = 7.5E3 ! m3/s
+  S_l_test = 32.   ! psu
+  test_CS%H_est(1,1) = 10.93  ! m
+  test_CS%W_h(1,1)   = 3.67E3 ! m
+  test_CS%a1(1,1)     = 0.93  ! mixing lenght
+  test_CS%a2(1,1)     = 1.2   ! tidal diffusion
+  Q_u_expected = 9329.0405
+  Q_l_expected = Q_r_test - Q_u_expected
+  S_u_expected = 17.5906
+  tol = 1
+  call estuary_box_model(test_CS, test_G, 1, 1, Q_r_test, S_l_test, Q_u_test, Q_l_test, S_u_test)
+  EBM_unit_tests = EBM_unit_tests .or. &
+    test_ebm_scalar(Q_u_test, Q_u_expected, tol, 'Q_u', test_name, verbose)
+  EBM_unit_tests = EBM_unit_tests .or. &
+    test_ebm_scalar(Q_l_test, Q_l_expected, tol, 'Q_l', test_name, verbose)
+  EBM_unit_tests = EBM_unit_tests .or. &
+    test_ebm_scalar(S_u_test, S_u_expected, tol, 'S_u', test_name, verbose)
+  if (.not. EBM_unit_tests) write(stdout,*) 'Passed' //test_name
   call teardown_EBM_test_CS(test_CS, test_G)
 
 end function EBM_unit_tests
@@ -1165,7 +1186,7 @@ subroutine setup_EBM_test_CS(CS, G)
   type(ocean_grid_type), intent(inout) :: G  !< Ocean grid structure to initialize
 
   ! Scalar EBM parameters
-  CS%tide_amp = 1.0      ! [m]
+  CS%tide_amp = 1.01      ! [m]
   CS%g        = 9.8      ! [m s-2]
   CS%rho_ref  = 1000.0   ! [kg m-3]
   CS%beta_S   = 7.7e-4   ! [ppt-1]
